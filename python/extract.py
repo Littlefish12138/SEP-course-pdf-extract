@@ -1,18 +1,14 @@
 from __future__ import annotations
-
 import zlib
-import logging
-import json
 from copy import copy
 from typing import overload
 
-# 配置logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # 全局变量
 TOLANCE = 0.7      # 用于识别q/Q的裁剪区域与单元格是否一致时的容许误差
 MERGE_GAP = 0.05   # 用于清洗表格边框之间的细小间隙
+LINE_MIN_SPAN = 5.0       # 黑色网格中识别表格线所需的最小长边
+LINE_EDGE_TOLERANCE = 2.0 # 单元格边与逻辑表格线中心的最大对齐误差
 
 # =======================  解析器类  =======================
 
@@ -151,7 +147,7 @@ class DictParser(BaseParser):
         1. (0,0,800,400), 见于 /MediaBox 这样的恰有四个数的指令中
         2. [(1,0,'R'),(4,0,'R')], 见于 /Kids 这样的指令中
         3. 4, 见于 /K 指令中
-        4. [b'1234',b'5678'], 见于 ID 这样的指令中
+        4. [b'1234',b'5678'], 见于 ID 指令, bfrange 等位置中
         """
         assert self.data[self.pos] == ord('[')
         self.pos += 1  # 跳过 '['
@@ -374,12 +370,19 @@ class CMapParser(DictParser):
             self.skip_whitespace()
             src_end = self.read_hexstr()
             self.skip_whitespace()
-            dst_start = self.read_hexstr()
+
             s = int(src_start, 16)
             e = int(src_end, 16)
-            d = int(dst_start, 16)
-            for i in range(e - s + 1):
-                cmap[s + i] = d + i
+            if self.data[self.pos] == ord('<'):
+                dst_start = self.read_hexstr()
+                d = int(dst_start, 16)
+                for i in range(e - s + 1):
+                    cmap[s + i] = d + i
+            elif self.data[self.pos] == ord('['):
+                dst_list = self.parse_array()
+                d = [int(j,16) for j in dst_list]
+                for i in range(e - s + 1):
+                    cmap[s + i] = d[i]
         self.skip_whitespace()
         w = self.read_name()
         assert w == b'endbfrange'
@@ -590,10 +593,10 @@ class ContentParser(DictParser):
         elif op == b'BDC':
             props = operands.pop()
             name = operands.pop()
-            assert name == b'P'
+            assert name in (b'P',b'Span')
             block = None
             if not self._ignoring():
-                block = MarkedContentBlock(clip=self._clip, mcid=props.get(b'MCID'))
+                block = MarkedContentBlock(mark_type=name, mcid=props.get(b'MCID'))
                 self._active_mc_block = block
             self._mc_stack.append(_Scope('BDC', block=block))
 
@@ -608,11 +611,7 @@ class ContentParser(DictParser):
             if ignoring:
                 return
             block = self._active_mc_block
-            if block is None:
-                # 文本出现在标记内容块之外: 建立一个隐式块保存, 避免丢失
-                block = MarkedContentBlock(clip=self._clip, mcid=None)
-                self._active_mc_block = block
-                self.marked_blocks.append(block)
+
             # 新文本对象: 文本矩阵/文本行矩阵重置为单位矩阵
             self._text_stack.append(None)
 
@@ -674,7 +673,8 @@ class ContentParser(DictParser):
             # 翻译成对应的 TextItem 类
             for source, parts in groups:
                 block.text_items.append(TextItem(self._font, x, y,
-                                                 b''.join(parts), parts, source))
+                                                 b''.join(parts), parts, source, 
+                                                 self._clip))
 
         elif op == b'Tj':
             data, source = operands.pop()
@@ -686,7 +686,8 @@ class ContentParser(DictParser):
             x, y = baseline
             block = self._active_mc_block
             assert block is not None
-            block.text_items.append(TextItem(self._font, x, y, data, [data], source))
+            block.text_items.append(TextItem(self._font, x, y, data, [data], source, 
+                                             self._clip))
 
         elif op == b'Tc':
             operands.pop()
@@ -898,6 +899,12 @@ class Rect:
                     and (abs(value.y1 - self.y1) <= TOLANCE) 
                     and (abs(value.y2 - self.y2) <= TOLANCE))
 
+    def __str__(self):
+        return f'Rect: x1={self.x1}, x2={self.x2}, y1={self.y1}, y2={self.y2}, fill_color={self.fill_color}'
+
+    def __repr__(self):
+        return f'Rect: x1={self.x1}, x2={self.x2}, y1={self.y1}, y2={self.y2}, fill_color={self.fill_color}'
+
 
 class _Scope:
     """解析过程中的作用域帧
@@ -930,7 +937,8 @@ class _Scope:
 class TextItem:
     """一个 Tm + TJ/Tj 对应的文本片段"""
     def __init__(self, font: bytes | None, x: float, y: float, text: bytes,
-                 parts: list[bytes], source: bytes):
+                 parts: list[bytes], source: bytes, 
+                 clip: Rect):
         """
         :param font: 字体名
         :param x:    基线坐标x
@@ -946,14 +954,26 @@ class TextItem:
         self.parts = parts    # 每个TJ/Tj指令的值, 或者说尚未进行拼合的具体内容
         self.source = source  # 来源信息, 为 b'()' 或 b'<>'
 
+        self.clip = clip      # 裁剪矩形
+
+    def __str__(self):
+        return f'text: font={self.font}, base_line=({self.x},{self.y}), text={self.text}, source={self.source}, clip={self.clip}'
+
+    def __repr__(self):
+        return f'text: font={self.font}, base_line=({self.x},{self.y}), text={self.text}, source={self.source}, clip={self.clip}'
 
 class MarkedContentBlock:
-    """代表一个 /P <<...>> BDC...EMC 标记内容块"""
-    def __init__(self, clip: Rect | None = None, mcid=None):
-        self.clip = clip                    # 进入 BDC 时的裁剪区域
+    """代表一个 /P <<...>> BDC...EMC 或 /Span <<...>> BDC...EMC 标记内容块"""
+    def __init__(self, mark_type: bytes , mcid=None):
+        self.mark_type = mark_type               # 进入 BDC 时的裁剪区域
         self.mcid = mcid                    # /MCID 值, 未给出时为 None
         self.text_items: list[TextItem] = []
 
+    def __str__(self):
+        return f'MarkedContentBlock: mcid={self.mcid},type={self.mark_type}, text_items={self.text_items}'
+
+    def __repr__(self):
+        return f'MarkedContentBlock: mcid={self.mcid},type={self.mark_type}, text_items={self.text_items}'
 
 # =======================  pdf 对象类  =======================
 
@@ -1011,17 +1031,23 @@ class ContentObj(PDFObj):
         self.content_parser = ContentParser(self.raw_stream)
         self.content_parser.parse()
 
-        self._cells = self.get_cells()
+        self._cells: list[dict] = None
 
-        self._table = self.get_table()
+        self._tables: list[dict] = None
 
-    def get_cells(self) -> list[Rect]:
+    def get_cells(self) -> list[dict]:
         """
         从content_parser中解析出的lines和rects重建表格
         重建逻辑
         1. 预处理, 丢弃非纯黑色的矩形或线条
-        2. 以所有纯黑色的矩形作为“墙”切割出单元格
+        2. 将纯黑色网格单元按四连通分组, 每个黑色连通分量视为一个表格
+        3. 在每个黑色连通分量内部以黑色作为“墙”切割出单元格
+        4. 从黑色网格中识别横竖表格线, 建立逻辑行列
+        5. 将每个单元格映射到逻辑行列, 得到 row_start/col_start/row_span/col_span
         """
+
+        if self._cells is not None:
+            return self._cells
 
         def _is_pure_black(color) -> bool:
             """
@@ -1063,7 +1089,7 @@ class ContentObj(PDFObj):
                     if r.x1 - MERGE_GAP <= x1 and x2 <= r.x2 + MERGE_GAP:
                         black[j][i] = True
         
-        # 并查集: 合并相邻(四连通)的白色网格单元
+        # 并查集: 合并相邻(四连通)的黑色网格单元, 得到表格边框连通分量
         parent = list(range(nx * ny))
 
         def find(a):
@@ -1079,56 +1105,581 @@ class ContentObj(PDFObj):
 
         for j in range(ny):
             for i in range(nx):
-                if black[j][i]:
+                if not black[j][i]:
                     continue
                 idx = j * nx + i
-                if i + 1 < nx and not black[j][i + 1]:
+                if i + 1 < nx and black[j][i + 1]:
                     union(idx, idx + 1)
-                if j + 1 < ny and not black[j + 1][i]:
+                if j + 1 < ny and black[j + 1][i]:
                     union(idx, idx + nx)
 
-        # 每个白色连通分量的包围盒即一个单元格
-        groups: dict[int, list[tuple[int, int]]] = {}
+        black_components: dict[int, list[tuple[int, int]]] = {}
         for j in range(ny):
             for i in range(nx):
-                if not black[j][i]:
-                    groups.setdefault(find(j * nx + i), []).append((i, j))
+                if black[j][i]:
+                    black_components.setdefault(find(j * nx + i), []).append((i, j))
 
-        cells = []
-        for members in groups.values():
-            i_min = min(i for i, _ in members)
-            i_max = max(i for i, _ in members)
-            j_min = min(j for _, j in members)
-            j_max = max(j for _, j in members)
-            x1, x2 = xs[i_min], xs[i_max + 1]
-            y1, y2 = ys[j_min], ys[j_max + 1]
-            if i_min == 0 or i_max == nx-1 or j_min == 0 or j_max == ny-1:
-                continue
-            cells.append(Rect(x1, y1, x2 - x1, y2 - y1))
+        def extract_cells(component: list[tuple[int, int]]) -> dict:
+            """对一个黑色连通分量执行原有的白色区域提取逻辑"""
+            i_min = min(i for i, _ in component)
+            i_max = max(i for i, _ in component)
+            j_min = min(j for _, j in component)
+            j_max = max(j for _, j in component)
+            width = i_max - i_min + 1
+            height = j_max - j_min + 1
+            local_xs = xs[i_min:i_min + width + 1]
+            local_ys = ys[j_min:j_min + height + 1]
 
-        # 按阅读顺序: 从上到下, 同一行内从左到右
-        cells.sort(key=lambda c: (-c.y1, c.x1))
-        return cells
+            # 只保留当前表格边框的黑色网格单元
+            local_black = [[False] * width for _ in range(height)]
+            for i, j in component:
+                local_black[j - j_min][i - i_min] = True
 
+            def get_runs(values: list[bool]) -> list[tuple[int, int]]:
+                runs = []
+                start = None
+                for index, marked in enumerate(values):
+                    if marked and start is None:
+                        start = index
+                    if not marked and start is not None:
+                        runs.append((start, index - 1))
+                        start = None
+                if start is not None:
+                    runs.append((start, len(values) - 1))
+                return runs
 
+            def get_horizontal_boundaries() -> list[float]:
+                """从黑色网格行中识别横向表格线"""
+                boundaries = []
+                band = None
+                for j in range(height):
+                    is_line_row = any(
+                        local_xs[end + 1] - local_xs[start] >= LINE_MIN_SPAN
+                        for start, end in get_runs(local_black[j])
+                    )
+                    if is_line_row:
+                        if band is not None and j == band[-1] + 1:
+                            band.append(j)
+                        else:
+                            band = [j]
+                            boundaries.append(band)
+                    else:
+                        band = None
+                return [(local_ys[rows[0]] + local_ys[rows[-1] + 1]) / 2
+                        for rows in boundaries][::-1]
 
-    def get_table(self) -> list[list[tuple[int,int,TextItem]]]:
-        pass
+            def get_vertical_boundaries() -> list[float]:
+                """从黑色网格列中识别纵向表格线"""
+                boundaries = []
+                band = None
+                for i in range(width):
+                    column = [local_black[j][i] for j in range(height)]
+                    is_line_column = any(
+                        local_ys[end + 1] - local_ys[start] >= LINE_MIN_SPAN
+                        for start, end in get_runs(column)
+                    )
+                    if is_line_column:
+                        if band is not None and i == band[-1] + 1:
+                            band.append(i)
+                        else:
+                            band = [i]
+                            boundaries.append(band)
+                    else:
+                        band = None
+                return [(local_xs[cols[0]] + local_xs[cols[-1] + 1]) / 2
+                        for cols in boundaries]
+
+            row_boundaries = get_horizontal_boundaries()
+            col_boundaries = get_vertical_boundaries()
+
+            def nearest_index(boundaries: list[float], value: float) -> int:
+                index = min(range(len(boundaries)), key=lambda k: abs(boundaries[k] - value))
+                if abs(boundaries[index] - value) > LINE_EDGE_TOLERANCE:
+                    raise ValueError(
+                        f"cell edge {value} is too far from any table line"
+                    )
+                return index
+
+            # 并查集: 合并当前表格内相邻(四连通)的白色网格单元
+            local_parent = list(range(width * height))
+
+            def local_find(a):
+                while local_parent[a] != a:
+                    local_parent[a] = local_parent[local_parent[a]]
+                    a = local_parent[a]
+                return a
+
+            def local_union(a, b):
+                ra, rb = local_find(a), local_find(b)
+                if ra != rb:
+                    local_parent[rb] = ra
+
+            for j in range(height):
+                for i in range(width):
+                    if local_black[j][i]:
+                        continue
+                    idx = j * width + i
+                    if i + 1 < width and not local_black[j][i + 1]:
+                        local_union(idx, idx + 1)
+                    if j + 1 < height and not local_black[j + 1][i]:
+                        local_union(idx, idx + width)
+
+            # 每个白色连通分量的包围盒即一个单元格
+            groups: dict[int, list[tuple[int, int]]] = {}
+            for j in range(height):
+                for i in range(width):
+                    if not local_black[j][i]:
+                        groups.setdefault(local_find(j * width + i), []).append((i, j))
+
+            cells: list[dict] = []
+            for members in groups.values():
+                li_min = min(i for i, _ in members)
+                li_max = max(i for i, _ in members)
+                lj_min = min(j for _, j in members)
+                lj_max = max(j for _, j in members)
+                x1, x2 = local_xs[li_min], local_xs[li_max + 1]
+                y1, y2 = local_ys[lj_min], local_ys[lj_max + 1]
+                if li_min == 0 or li_max == width - 1 or lj_min == 0 or lj_max == height - 1:
+                    continue
+                cell = Rect(x1, y1, x2 - x1, y2 - y1)
+
+                # 此处认为 row_start 和 col_start 的原点位于表格左上角
+                col_start = nearest_index(col_boundaries, cell.x1)
+                col_end = nearest_index(col_boundaries, cell.x2)
+                row_start = nearest_index(row_boundaries, cell.y2)
+                row_end = nearest_index(row_boundaries, cell.y1)
+                assert col_start < col_end and row_start < row_end
+                cells.append({
+                    "row_start": row_start,
+                    "col_start": col_start,
+                    "row_span": row_end - row_start,
+                    "col_span": col_end - col_start,
+                    "bbox": [cell.x1, cell.y1, cell.x2, cell.y2],
+                    "rect": cell,
+                })
+
+            # 按阅读顺序: 从上到下, 同一行内从左到右
+            cells.sort(key=lambda entry: (-entry["rect"].y1, entry["rect"].x1))
+            return {
+                "total_rows": len(row_boundaries) - 1,
+                "total_cols": len(col_boundaries) - 1,
+                "cells": cells,
+            }
+
+        tables = [extract_cells(members) for members in black_components.values()]
+        tables = [table for table in tables if table["cells"]]
+        # 按阅读顺序排列表格本身
+        tables.sort(key=lambda table: (
+            -min(cell["rect"].y1 for cell in table["cells"]),
+            min(cell["rect"].x1 for cell in table["cells"]),
+        ))
+
+        self._cells = tables
+        return tables
+
+    def get_tables(self) -> list[dict]:
+        """
+        将 marked_blocks 定位到 get_cells 得到的单元格中
+
+        定位优先级顺序:
+        1. clip 与某个单元格矩形相等
+        2. 根据包含基线坐标 + 位于裁剪区域内部进行筛选, 能确定出唯一单元格
+        3. 无法定位时认为该 block 不在表格当中
+        """
+        if self._tables is not None:
+            return self._tables
+
+        self._cells = self.get_cells()
+
+        tables = []
+        for table in self._cells:
+            cells = []
+            for cell in table["cells"]:
+                cell_copy = dict(cell)
+                cell_copy["marked_blocks"] = []
+                cells.append(cell_copy)
+            cells.sort(key=lambda cell: (cell["row_start"], cell["col_start"]))
+            tables.append({
+                "total_rows": table["total_rows"],
+                "total_cols": table["total_cols"],
+                "cells": cells,
+            })
+
+        all_cells = [cell for table in tables for cell in table["cells"]]
+
+        def locate_block(block: MarkedContentBlock) -> dict | None:
+            # 1. 若某个 TextItem 的裁剪区域与某个单元格一致, 则认为所有 Textitem 属于该单元格
+            for item in block.text_items:
+                for cell in all_cells:
+                    if item.clip == cell["rect"]:
+                        return cell
+
+            # 2. 若无法找到完全一致的单元格, 则根据包含基线坐标 + 位于裁剪区域内部进行筛选
+            # 断言此类单元格只有一个
+            located_cell = None
+            for item in block.text_items:
+                matches = [
+                    cell for cell in all_cells
+                    if (item.x, item.y) in cell["rect"] and cell["rect"] in item.clip
+                ]
+
+                if len(matches) != 1:
+                    continue
+
+                match = matches[0]
+
+                if located_cell is None:
+                    located_cell = match
+                elif match != located_cell:
+                    raise AssertionError(
+                        "all text baselines in one marked content block "
+                        "must be in the same cell"
+                    )
+            return located_cell
+
+        def block_reading_key(block: MarkedContentBlock):
+            if not block.text_items:
+                return (0.0, 0.0)
+            return (
+                -max(item.y for item in block.text_items),
+                min(item.x for item in block.text_items),
+            )
+
+        for block in self.content_parser.marked_blocks:
+            cell = locate_block(block)
+            if cell is not None:
+                cell["marked_blocks"].append(block)
+
+        for table in tables:
+            for cell in table["cells"]:
+                cell["marked_blocks"].sort(key=block_reading_key)
+
+        self._tables = tables
+        return tables
 
         
 class ObjStm(PDFObj):
     def __init__(self, data, id = None):
         super().__init__(data, id)
         assert self.raw_stream is not None
+        assert self.dict[b'Type'] == b'ObjStm'
         self.objstm_parser = ObjStmParser(self.raw_stream)
+
+    def get_obj(self, id: int) -> PDFObj | None:
+        return self.objstm_parser.parse_obj(id)
 
 class CMapObj(PDFObj):
     def __init__(self, data, id = None):
         super().__init__(data, id)
         assert self.raw_stream is not None
         self.cmap_parser = CMapParser(self.raw_stream)
+        self.cmap = self.cmap_parser.get_cmap()
 
 class XRefObj(PDFObj):
     def __init__(self, data, id = None):
         super().__init__(data, id)
         assert self.raw_stream is not None
+        assert self.dict[b'Type'] == b'XRef'
+
+        self.w = self.dict[b'W']
+        assert len(self.w) == 3 and all(isinstance(v,int) for v in self.w)
+
+        self.stream = zlib.decompress(self.raw_stream)
+
+        self.xref = self.get_xref()
+
+    def get_xref(self) -> dict[int,tuple[int, int, int]]:
+        """
+        根据 id 解析偏移量, 返回xref交叉引用表id->offset, offset为元组, 第一位为生成号, 第二位按照不同情况为
+        1. 类型为 1 (普通对象), 第二位为(start,gen_number), 表示起始索引和生成号
+        2. 类型为 2 (压缩对象), 第二位为(所在ObjStm对象编号, 索引)
+        """
+        width = sum(self.w)  # 存储映射 obj_id -> start_offset
+        result = {} 
+        for i in range(0, len(self.stream), width):
+            obj_type = int.from_bytes(self.stream[i : i + self.w[0]])
+            if obj_type == 0:
+                continue
+            elif obj_type in (1, 2):
+                num2 = int.from_bytes(self.stream[i + self.w[0] : i + self.w[0] + self.w[1]])
+                num3 = int.from_bytes(self.stream[i + self.w[0] + self.w[1] : i + width])
+                result[i//7] = (obj_type, num2, num3)
+        
+        return result
+
+
+# ======================= PDF 文档类及页面类 =======================
+
+class Page:
+    def __init__(self, page_index: int, 
+                 page_obj: PDFObj, 
+                 content_obj: ContentObj, 
+                 decode_map: dict):
+        self.page_index = page_index
+        self.page_obj = page_obj
+        self.content_obj = content_obj
+        self.decode_map = decode_map
+
+        self.raw_tables = None
+        self.tables = None
+
+    def decode_text(self,block: MarkedContentBlock) -> str:
+        text = ''.join(
+            self.decode_map[text_item.font](text_item.text) for text_item in block.text_items
+            )
+        return text
+
+    def get_tables(self) -> list[dict]:
+        if self.tables is not None:
+            return self.tables
+
+        raw_tables = self.content_obj.get_tables()
+        tables = []
+        for raw_table in raw_tables:
+            table = {
+                'total_rows': raw_table['total_rows'],
+                'total_cols': raw_table['total_cols']
+            }
+            cells = [{
+                'row_start': raw_cell['row_start'],
+                'col_start': raw_cell['col_start'],
+                'row_span':  raw_cell['row_span'],
+                'col_span':  raw_cell['col_span'],
+                'bbox':      raw_cell['bbox'],
+                'text':      self.decode_text(raw_cell['marked_blocks'][0]) if raw_cell['marked_blocks'] else ''
+            } for raw_cell in raw_table['cells']]
+
+            table['cells'] = cells
+            tables.append(table)
+
+        self.tables = tables
+        return tables
+            
+
+class PDFTableExtractor:
+    def __init__(self, path_or_fp: str | bytes):
+        """
+        :param path_or_fp: pdf 文件路径或二进制 pdf 字节流
+        """
+        if isinstance(path_or_fp, str):
+            with open(path_or_fp,'rb') as f:
+                self.data = f.read()
+        elif isinstance(path_or_fp, bytes):
+            self.data = path_or_fp
+        else:
+            raise ValueError("")
+
+
+        self._parser = DictParser(self.data)
+
+        self._xref = self._get_xref()
+        self._xref_obj: XRefObj
+
+        self._obj_map: dict[int, PDFObj | CMapObj | ObjStm | ContentObj] = {}
+
+        self._catalog_obj: PDFObj = self._get_obj(self._xref_obj.dict[b'Root'], 'PDFObj')
+        self._metadata_obj: PDFObj = self._get_obj(self._xref_obj.dict[b'Info'], 'PDFObj')
+
+        self.metadata = self._get_metadata()
+
+        self._pages_root: PDFObj = self._get_obj(self._catalog_obj.dict[b'Pages'],'PDFObj')
+
+        self.pages = self._get_pages()
+
+    def _get_xref(self):
+        pos = self.data.rfind(b'startxref')
+        assert pos != -1
+        self._parser.pos = pos
+        self._parser.read_name()
+        self._parser.skip_whitespace()
+
+        startxref = self._parser.read_number()
+        self._parser.pos = startxref
+
+        keyword1 = self._parser.read_name()
+        assert keyword1 == b'xref'
+        self._parser.skip_whitespace()
+
+        num1 = self._parser.read_number()
+        self._parser.skip_whitespace()
+        num2 = self._parser.read_number()
+        self._parser.skip_whitespace()
+
+        keyword2 = self._parser.read_name()
+        self._parser.skip_whitespace()
+        assert keyword2 == b'trailer'
+        
+        trailer_dict = self._parser.parse_dict()
+
+        start = trailer_dict[b'XRefStm']
+        end = self.data.find(b'endobj',start) + 6
+        self._xref_obj = XRefObj(self.data[start:end])
+
+        return self._xref_obj.get_xref()
+
+    def _get_obj(self, id_or_ref: int | tuple[int, int, str], type: str) -> PDFObj | CMapObj | ObjStm | ContentObj:
+        if isinstance(id_or_ref, int):
+            obj_id = id_or_ref
+        elif isinstance(id_or_ref, tuple):
+            obj_id = id_or_ref[0]
+
+        if obj_id in self._obj_map.keys():
+            return self._obj_map[obj_id]
+
+        if self._xref[obj_id][0] == 1:
+            start = self._xref[obj_id][1]
+            end = self.data.find(b'endobj',start) + 6
+
+            if type == 'PDFObj':
+                obj = PDFObj(self.data[start:end])
+            elif type == 'CMapObj':
+                obj = CMapObj(self.data[start:end])
+            elif type == 'ObjStm':
+                obj = ObjStm(self.data[start:end])
+            elif type == 'ContentObj':
+                obj = ContentObj(self.data[start:end])
+            else:
+                raise ValueError(f'Unsupported obj type {type}')
+            self._obj_map[obj.id] = obj
+
+        elif self._xref[id][0] == 2:
+            parent_id = self._xref[id][1]
+            parent_obj: ObjStm = self._get_obj(parent_id, 'ObjStm')
+            obj = parent_obj.get_obj(obj_id)
+            self._obj_map[obj.id] = obj
+
+        return obj
+
+    def _get_metadata(self) -> dict:
+        meta_data = self._metadata_obj.dict
+        metadata = {}
+
+        for key, value in meta_data.items():
+            if key in (b'Producer',b'Creator') and value[:2] == b'\xfe\xff':
+                metadata[key.decode()] = value.decode('utf-16')
+            else:
+                metadata[key.decode()] = value.decode()
+        return metadata
+                
+    def _get_pages(self) -> list[Page]:
+
+        page_list = []
+
+        for index, ref in enumerate(self._pages_root.dict[b'Kids']):
+            page_obj_id = ref[0]
+            page_obj: PDFObj = self._get_obj(page_obj_id,'PDFObj')
+
+            content_ref = page_obj.dict[b'Contents']
+            content_obj: ContentObj = self._get_obj(content_ref, 'ContentObj')
+
+            font_refs: dict[bytes,tuple[int,int,str]] = page_obj.dict[b'Resources'][b'Font']
+
+            decode_map: dict = {}  # font_name -> decode_callback, font_name为 bytes
+            for font_name, font_ref in font_refs.items():
+                font_obj: PDFObj = self._get_obj(font_ref, 'PDFObj')
+                encoding = font_obj.dict[b'Encoding']
+                assert encoding in (b'WinAnsiEncoding', b'Identity-H')
+                assert b'Differences' not in font_obj.dict.keys()
+
+                if encoding == b"WinAnsiEncoding":
+                    decode_callback = lambda text: text.decode()
+                elif encoding == b"Identity-H":
+                    cmap_ref: tuple[int,int,str] = font_obj.dict[b'ToUnicode']
+                    cmap_obj: CMapObj = self._get_obj(cmap_ref,'CMapObj')
+                    cmap_dict = cmap_obj.cmap
+                    def decode_callback(text: bytes, cmap=cmap_dict) -> str:
+                        # 每4个十六进制字符转为一个CID
+                        return ''.join(
+                            chr(cmap[int(text[i:i+4], 16)])
+                            for i in range(0, len(text), 4)
+                        )
+
+                decode_map[font_name] = decode_callback
+
+            page_list.append(Page(index, page_obj, content_obj, decode_map))
+
+        return page_list
+
+
+    @overload
+    def extract_table(self) -> dict[int, list[dict]]:
+        """提取所有页面的表格"""
+        ...
+
+    @overload
+    def extract_table(self, index: int) -> list[dict]:
+        """
+        :param index: 页面索引(零索引)
+        """
+        ...
+
+    @overload
+    def extract_table(self, start: int, end: int) -> dict[int, list[dict]]:
+        """提取 [start:end] 页面索引的表格"""
+        ...
+
+    @overload
+    def extract_table(self, index_list: list[int]) -> dict[int, list[dict]]:
+        """
+        :param index_list: 待提取页面索引列表(零索引)
+        """
+        ...
+
+    @overload
+    def extract_table(self, index_range: range) -> dict[int, list[dict]]:
+        """
+        :param index_range: 索引 range 对象(零索引)
+        """
+        ...
+
+    def extract_table(self, *args):
+        """
+        提取指定页面中的表格，每个表格为一个 dict, 格式: 
+        ```
+        {
+            'total_rows': 总(逻辑)行数,
+            'total_cols': 总(逻辑)列数,
+            'cells': [{
+                'row_start': 行起始,
+                'col_start': 列起始,
+                'row_span': 行合并数,
+                'col_span': 列合并数,
+                'bbox': [x1, y1, x2, y2],
+                'text': 文本内容
+            }]
+        }
+        ```
+        """
+        # 解析参数
+        if len(args) == 0:
+            index_list = range(len(self.pages))
+        elif len(args) == 1:
+            arg = args[0]
+            if isinstance(arg, int):
+                index = arg
+                if not (0 <= index < len(self.pages)):
+                    raise IndexError(f"Page index {index} out of range")
+                return self.pages[index].get_tables()
+            elif isinstance(arg, list):
+                if not all(isinstance(p, int) for p in arg):
+                    raise TypeError("List elements must be integers")
+                index_list = arg
+            elif isinstance(arg, range):
+                index_list = arg
+            else:
+                raise TypeError(f"Unsupported argument type: {type(arg)}")
+        elif len(args) == 2:
+            start, end = args
+            if not (isinstance(start, int) and isinstance(end, int)):
+                raise TypeError("start and end must be integers")
+            index_list = range(len(self.pages))[start:end]
+        else:
+            raise TypeError("Expected 0, 1, or 2 arguments")
+
+        # 统一处理可迭代的 pages（列表或 range）
+        tables = {}
+        for i in index_list:
+            if not (0 <= i < len(self.pages)):
+                raise IndexError(f"Page index {i} out of range")
+            tables[i] = self.pages[i].get_tables()
+        return tables
