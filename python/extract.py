@@ -5,7 +5,7 @@ from typing import overload
 
 
 # 全局变量
-TOLANCE = 0.7      # 用于识别q/Q的裁剪区域与单元格是否一致时的容许误差
+TOLERANCE = 0.7      # 用于识别q/Q的裁剪区域与单元格是否一致时的容许误差
 MERGE_GAP = 0.05   # 用于清洗表格边框之间的细小间隙
 LINE_MIN_SPAN = 5.0       # 黑色网格中识别表格线所需的最小长边
 LINE_EDGE_TOLERANCE = 2.0 # 单元格边与逻辑表格线中心的最大对齐误差
@@ -887,17 +887,17 @@ class Rect:
             x, y = item
             return (self.x1 <= x <= self.x2) and (self.y1 <= y <= self.y2)
         elif isinstance(item, Rect):
-            return ((self.x1 - TOLANCE <= item.x1) and (item.x2 <= self.x2 + TOLANCE) 
-                    and (self.y1 - TOLANCE <= item.y1) and (item.y2 <= self.y2 + TOLANCE))
+            return ((self.x1 - TOLERANCE <= item.x1) and (item.x2 <= self.x2 + TOLERANCE) 
+                    and (self.y1 - TOLERANCE <= item.y1) and (item.y2 <= self.y2 + TOLERANCE))
 
     def __eq__(self, value):
         if not isinstance(value, Rect):
             return False
         else:
-            return ((abs(value.x1 - self.x1) <= TOLANCE) 
-                    and (abs(value.x2 - self.x2) <= TOLANCE) 
-                    and (abs(value.y1 - self.y1) <= TOLANCE) 
-                    and (abs(value.y2 - self.y2) <= TOLANCE))
+            return ((abs(value.x1 - self.x1) <= TOLERANCE) 
+                    and (abs(value.x2 - self.x2) <= TOLERANCE) 
+                    and (abs(value.y1 - self.y1) <= TOLERANCE) 
+                    and (abs(value.y2 - self.y2) <= TOLERANCE))
 
     def __str__(self):
         return f'Rect: x1={self.x1}, x2={self.x2}, y1={self.y1}, y2={self.y2}, fill_color={self.fill_color}'
@@ -1403,7 +1403,7 @@ class XRefObj(PDFObj):
             elif obj_type in (1, 2):
                 num2 = int.from_bytes(self.stream[i + self.w[0] : i + self.w[0] + self.w[1]])
                 num3 = int.from_bytes(self.stream[i + self.w[0] + self.w[1] : i + width])
-                result[i//7] = (obj_type, num2, num3)
+                result[i//width] = (obj_type, num2, num3)
         
         return result
 
