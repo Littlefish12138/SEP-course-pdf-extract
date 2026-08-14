@@ -4,21 +4,13 @@
 
 特点：
 
-- 1700行 Python 代码，零第三方依赖，只用 Python 标准库，需要 Python 3.9+
-- 同时提供 JavaScript 迁移版（`js/extract.js`，Node.js 与浏览器通用）与单文件 HTML 版（`html/index.html`）
+- Python: 零第三方依赖，只用 Python 标准库，需要 Python 3.9+
+- Javascript: 同时提供 JavaScript 迁移版（`js/extract.js`，Node.js 与浏览器通用）
+- HTML: 提供单文件 HTML 版（`html/index.html`）
 - 输出 `row_start` / `col_start` / `row_span` / `col_span`，可以据此直接还原合并单元格
 - 在 12 份课程表 PDF 样本上，完整提取平均约 1.3 秒（JS 版约 0.1 秒）
-- 使用 DeepSeek V4 Pro、DeepSeek V4 Flash0731 和 Codex(CC-Switch) 进行开发
 
-## 背景
-
-之前看到不少用 HTML 做选课时间冲突检查的小工具，但课程表往往直接写死在 HTML 里。然后就想写一个解析的工具。一开始试了试一些开源库、免费的 PDF 转表格方案，结果总有一些文字定位、OCR 之类的识别错误。我不是很满意，想把这些测试文件做到 100% 正确，于是就Vibe-Coding了这个💩💩💩。后来知道 OpenDataLoader 等库也能做到类似效果，所以这个项目在开源生态面前不值一提🤡🤡🤡。
-
-## 制作过程
-
-一开始直接试了 `pdfplumber`、`camelot`、`tabula`。这些库能拿到文本和矩形，但我当时没能从中找到直接还原合并单元格的 `row_span` / `col_span` 的办法。后来试了 `MinerU`，它有一部分依赖 OCR，文字溢出单元格比重较大时容易识别错。
-
-于是就自己解析 PDF。花了一些时间学习内容流指令、对象结构、字体和 CMap 这些内部格式(实则拷打deepseek)，最终写出这坨💩。
+先后使用 DeepSeek V4 Pro、DeepSeek V4 Flash0731 + Codex(CC-Switch) 以及Deepseek V4 Flash0731 + Deepseek Harness进行开发
 
 ## 用法
 
@@ -42,14 +34,14 @@ selected = extractor.extract_table([0, 2])     # PDF 第 1、3 页
 `js/extract.js` 是 Python 版的 JavaScript 迁移，接口保持一致（方法名为 snake_case 的 `extract_table`），不依赖任何 Node.js 专有语法，可在 Node.js 与浏览器中运行：
 
 ```js
-const { PDFTableExtractor } = require('./js/extract.js');
+const { PDFTableExtractor } = require("./js/extract.js");
 
 const extractor = new PDFTableExtractor("course_schedule.pdf"); // 路径或 Uint8Array/ArrayBuffer
 
-const all_pages = extractor.extract_table();       // {0: [table, ...], 1: [table, ...], ...}
-const page_two  = extractor.extract_table(1);      // PDF 第 2 页，返回 [table, ...]
-const first_3   = extractor.extract_table(0, 3);   // PDF 第 1~3 页
-const selected  = extractor.extract_table([0, 2]); // PDF 第 1、3 页
+const all_pages = extractor.extract_table(); // {0: [table, ...], 1: [table, ...], ...}
+const page_two = extractor.extract_table(1); // PDF 第 2 页，返回 [table, ...]
+const first_3 = extractor.extract_table(0, 3); // PDF 第 1~3 页
+const selected = extractor.extract_table([0, 2]); // PDF 第 1、3 页
 ```
 
 命令行用法：`node js/cli.js <pdf文件> [页面索引] [结束索引]`，输出与 Python 版一致的 JSON。
@@ -105,6 +97,16 @@ const selected  = extractor.extract_table([0, 2]); // PDF 第 1、3 页
 测试样本来自选课系统自 2019-2020 春季学期以来的课程开设表 PDF。其中 2019-2020 春没有纳入：它的生成方式推测为 Foxit，而之后导出的文件都由 Microsoft Excel 生成，且其指令格式和特征和之后有较大差异，因此不考虑对其进行支持。2023-2024 春也没有纳入：sep 教务系统上的下载链接异常，因此没有拿到这份文件。
 
 测试样本共 12 份课程表 PDF，每份完整提取 3 次取平均，全部样本平均约 1.3 秒，单份平均耗时约 0.7 到 1.9 秒。当前样本上可以输出包含 `row_span` / `col_span` 的表格结构。
+
+## 背景
+
+之前看到不少用 HTML 做选课时间冲突检查的小工具，但课程表往往直接写死在 HTML 里。然后就想写一个解析的工具。一开始试了试一些开源库、免费的 PDF 转表格方案，结果总有一些文字定位、OCR 之类的识别错误。我不是很满意，想把这些测试文件做到 100% 正确，于是就Vibe-Coding了这个💩💩💩。后来知道 OpenDataLoader 等库也能做到类似效果，所以这个项目在开源生态面前不值一提🤡🤡🤡。
+
+## 制作过程
+
+一开始直接试了 `pdfplumber`、`camelot`、`tabula`。这些库能拿到文本和矩形，但我当时没能从中找到直接还原合并单元格的 `row_span` / `col_span` 的办法。后来试了 `MinerU`，它有一部分依赖 OCR，文字溢出单元格比重较大时容易识别错。
+
+于是就自己解析 PDF。花了一些时间学习内容流指令、对象结构、字体和 CMap 这些内部格式(实则拷打deepseek)，最终写出这坨💩。
 
 ## 实现思路
 
