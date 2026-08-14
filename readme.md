@@ -5,8 +5,9 @@
 特点：
 
 - 1700行 Python 代码，零第三方依赖，只用 Python 标准库，需要 Python 3.9+
+- 同时提供 JavaScript 迁移版（`js/extract.js`，Node.js 与浏览器通用）与单文件 HTML 版（`html/index.html`）
 - 输出 `row_start` / `col_start` / `row_span` / `col_span`，可以据此直接还原合并单元格
-- 在 12 份课程表 PDF 样本上，完整提取平均约 1.3 秒
+- 在 12 份课程表 PDF 样本上，完整提取平均约 1.3 秒（JS 版约 0.1 秒）
 - 使用 DeepSeek V4 Pro、DeepSeek V4 Flash0731 和 Codex(CC-Switch) 进行开发
 
 ## 背景
@@ -35,6 +36,34 @@ selected = extractor.extract_table([0, 2])     # PDF 第 1、3 页
 ```
 
 代码里使用的是 0 起始的页面索引，PDF 页码数字等于页面索引加 1。`extract_table(start, end)` 的区间是左闭右开。
+
+### JavaScript 版用法
+
+`js/extract.js` 是 Python 版的 JavaScript 迁移，接口保持一致（方法名为 snake_case 的 `extract_table`），不依赖任何 Node.js 专有语法，可在 Node.js 与浏览器中运行：
+
+```js
+const { PDFTableExtractor } = require('./js/extract.js');
+
+const extractor = new PDFTableExtractor("course_schedule.pdf"); // 路径或 Uint8Array/ArrayBuffer
+
+const all_pages = extractor.extract_table();       // {0: [table, ...], 1: [table, ...], ...}
+const page_two  = extractor.extract_table(1);      // PDF 第 2 页，返回 [table, ...]
+const first_3   = extractor.extract_table(0, 3);   // PDF 第 1~3 页
+const selected  = extractor.extract_table([0, 2]); // PDF 第 1、3 页
+```
+
+命令行用法：`node js/cli.js <pdf文件> [页面索引] [结束索引]`，输出与 Python 版一致的 JSON。
+
+浏览器中使用时，需要提供 zlib inflate 实现：Node.js 下自动使用内置 `zlib`；浏览器下推荐使用原生 `DecompressionStream`（通过异步工厂 `PDFTableExtractor.create(bytes)` 预解压全部流，`html/index.html` 即采用此方式）；若页面提供了全局 `pako`，同步构造函数也能直接使用。
+
+### 浏览器版（单文件 HTML）
+
+`html/index.html` 是单文件页面（零第三方依赖，解压使用浏览器原生 `DecompressionStream`），直接用浏览器打开即可：
+
+- 选择 sep 教务系统导出的 PDF 并点击"解析"
+- 结果以 HTML 表格呈现，合并单元格通过 `rowspan`/`colspan` 还原
+- 支持按页查看、显示 JSON 视图
+- 对外暴露基本功能入口 `window.__app`（`parseFile` / `render` / `renderTables` 等），便于二次集成
 
 ### 输出结构
 
