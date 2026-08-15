@@ -496,7 +496,7 @@
        */
       DictParser.prototype.parseNumberOrRef = function () {
         assert(
-          DIGIT_CODES.has(this.data.charCodeAt(this.pos)),
+          NUM_CODES.has(this.data.charCodeAt(this.pos)),
           "expected a digit",
         );
         var a = this.readNumber();

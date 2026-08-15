@@ -375,7 +375,7 @@ DictParser.prototype.constructor = DictParser;
  * 解析完成后自动移动游标。
  */
 DictParser.prototype.parseNumberOrRef = function () {
-  assert(DIGIT_CODES.has(this.data.charCodeAt(this.pos)), "expected a digit");
+  assert(NUM_CODES.has(this.data.charCodeAt(this.pos)), "expected a digit");
   var a = this.readNumber();
   var savedPos = this.pos;
   this.skipWhitespace();
