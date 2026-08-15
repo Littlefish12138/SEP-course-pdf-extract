@@ -20,12 +20,12 @@
  *   ex.extract_table([0, 2])      // 指定页面列表
  * ============================================================================= */
 
-'use strict';
+"use strict";
 
 // ---------------- 全局常量 ----------------
-var TOLANCE = 0.7;        // 识别 q/Q 的裁剪区域与单元格是否一致时的容许误差
-var MERGE_GAP = 0.05;     // 清洗表格边框之间的细小间隙
-var LINE_MIN_SPAN = 5.0;  // 黑色网格中识别表格线所需的最小长边
+var TOLERANCE = 0.7; // 识别 q/Q 的裁剪区域与单元格是否一致时的容许误差
+var MERGE_GAP = 0.05; // 清洗表格边框之间的细小间隙
+var LINE_MIN_SPAN = 5.0; // 黑色网格中识别表格线所需的最小长边
 var LINE_EDGE_TOLERANCE = 2.0; // 单元格边与逻辑表格线中心的最大对齐误差
 
 // ---------------- 基础工具 ----------------
@@ -33,38 +33,48 @@ var LINE_EDGE_TOLERANCE = 2.0; // 单元格边与逻辑表格线中心的最大�
 /** 断言：条件不成立时抛出 Error（对应 Python 的 assert） */
 function assert(cond, msg) {
   if (!cond) {
-    throw new Error(msg !== undefined ? msg : 'AssertionError');
+    throw new Error(msg !== undefined ? msg : "AssertionError");
   }
 }
 
 // 数字字节集合（对应 Python 的 b'+-.0123456789'）
-var NUM_CODES = new Set([0x2b, 0x2d, 0x2e, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39]);
+var NUM_CODES = new Set([
+  0x2b, 0x2d, 0x2e, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+]);
 // 纯数字字节集合（0-9，对应 Python 的 b'0123456789'）
-var DIGIT_CODES = new Set([0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39]);
+var DIGIT_CODES = new Set([
+  0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+]);
 // 空白字节集合（对应 Python 的 b' \t\n\r\f'）
 var WS_CODES = new Set([0x20, 0x09, 0x0a, 0x0d, 0x0c]);
 // 名称结束符集合（对应 Python 的 b' \t\n\r\f()<>[]{}/%'）
-var NAME_END_CODES = new Set([0x20, 0x09, 0x0a, 0x0d, 0x0c, 0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25]);
+var NAME_END_CODES = new Set([
+  0x20, 0x09, 0x0a, 0x0d, 0x0c, 0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d,
+  0x2f, 0x25,
+]);
 // read_string 中允许的转义字符（对应 Python 的 b'\\()'）
 var ESC_CODES = new Set([0x5c, 0x28, 0x29]);
 
 /** 二进制字节 -> latin1 字符串（逐字节映射，保证字节语义与 Python bytes 一致） */
 function bytesToLatin1(bytes) {
-  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(bytes)) {
-    return bytes.toString('latin1');
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(bytes)) {
+    return bytes.toString("latin1");
   }
   if (bytes instanceof Uint8Array) {
-    var s = '';
+    var s = "";
     var CHUNK = 0x8000;
     for (var i = 0; i < bytes.length; i += CHUNK) {
-      s += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CHUNK, bytes.length)));
+      s += String.fromCharCode.apply(
+        null,
+        bytes.subarray(i, Math.min(i + CHUNK, bytes.length)),
+      );
     }
     return s;
   }
   if (bytes instanceof ArrayBuffer) {
     return bytesToLatin1(new Uint8Array(bytes));
   }
-  throw new Error('bytesToLatin1: unsupported input');
+  throw new Error("bytesToLatin1: unsupported input");
 }
 
 /** latin1 字符串 -> 二进制字节 */
@@ -78,12 +88,12 @@ function latin1ToBytes(s) {
 
 /** utf-8 解码（对应 Python bytes.decode() 的默认编码） */
 function utf8Decode(s) {
-  return new TextDecoder('utf-8').decode(latin1ToBytes(s));
+  return new TextDecoder("utf-8").decode(latin1ToBytes(s));
 }
 
 /** utf-16(BE, 带 BOM) 解码：输入为以 \uFEFF 开头的 latin1 字符串 */
 function utf16beDecode(s) {
-  var out = '';
+  var out = "";
   for (var i = 2; i + 1 < s.length; i += 2) {
     out += String.fromCharCode((s.charCodeAt(i) << 8) | s.charCodeAt(i + 1));
   }
@@ -128,7 +138,9 @@ function inflate(latin1Str) {
     return inflateCache.get(latin1Str);
   }
   if (!inflateImpl) {
-    throw new Error('zlib inflate implementation not available (need Node.js zlib or global pako)');
+    throw new Error(
+      "zlib inflate implementation not available (need Node.js zlib or global pako)",
+    );
   }
   return inflateImpl(latin1Str);
 }
@@ -139,13 +151,21 @@ function setInflateCache(cache) {
 }
 
 (function installInflate() {
-  if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+  if (
+    typeof process !== "undefined" &&
+    process.versions &&
+    process.versions.node
+  ) {
     // Node.js 环境
-    var zlib = require('zlib');
+    var zlib = require("zlib");
     inflateImpl = function (s) {
       return zlib.inflateSync(latin1ToBytes(s));
     };
-  } else if (typeof globalThis !== 'undefined' && globalThis.pako && typeof globalThis.pako.inflate === 'function') {
+  } else if (
+    typeof globalThis !== "undefined" &&
+    globalThis.pako &&
+    typeof globalThis.pako.inflate === "function"
+  ) {
     // 浏览器环境：全局 pako（未内联 pako 时此分支不生效）。
     // pako 不忽略 deflate 流之后的尾随数据（Python/Node 的 zlib 会忽略），
     // 因此失败时从尾部逐字节截断重试，找到真正的流结束位置。
@@ -153,17 +173,25 @@ function setInflateCache(cache) {
       var bytes = latin1ToBytes(s);
       var pako = globalThis.pako;
       var out = null;
-      try { out = pako.inflate(bytes); } catch (e) { out = null; }
+      try {
+        out = pako.inflate(bytes);
+      } catch (e) {
+        out = null;
+      }
       if (out) {
         return out;
       }
       for (var n = bytes.length - 1; n >= Math.max(0, bytes.length - 64); n--) {
-        try { out = pako.inflate(bytes.subarray(0, n)); } catch (e2) { out = null; }
+        try {
+          out = pako.inflate(bytes.subarray(0, n));
+        } catch (e2) {
+          out = null;
+        }
         if (out) {
           return out;
         }
       }
-      throw new Error('zlib inflate failed: ' + bytes.length + ' bytes');
+      throw new Error("zlib inflate failed: " + bytes.length + " bytes");
     };
   }
 })();
@@ -175,11 +203,11 @@ function setInflateCache(cache) {
  * 因此失败时从尾部逐字节截断重试，找到真正的流结束位置。
  */
 async function inflateWithDecompressionStream(bytes) {
-  if (typeof DecompressionStream === 'undefined') {
-    throw new Error('DecompressionStream is not supported in this browser');
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("DecompressionStream is not supported in this browser");
   }
   async function inflateOnce(data) {
-    var ds = new DecompressionStream('deflate');
+    var ds = new DecompressionStream("deflate");
     var stream = new Blob([data]).stream().pipeThrough(ds);
     var buf = await new Response(stream).arrayBuffer();
     return new Uint8Array(buf);
@@ -190,7 +218,9 @@ async function inflateWithDecompressionStream(bytes) {
     for (var n = bytes.length - 1; n >= Math.max(0, bytes.length - 64); n--) {
       try {
         return await inflateOnce(bytes.subarray(0, n));
-      } catch (e2) { /* 继续截断 */ }
+      } catch (e2) {
+        /* 继续截断 */
+      }
     }
     throw e;
   }
@@ -209,7 +239,10 @@ function BaseParser(data) {
 }
 
 BaseParser.prototype.skipWhitespace = function () {
-  while (this.pos < this.data.length && WS_CODES.has(this.data.charCodeAt(this.pos))) {
+  while (
+    this.pos < this.data.length &&
+    WS_CODES.has(this.data.charCodeAt(this.pos))
+  ) {
     this.pos += 1;
   }
 };
@@ -226,13 +259,16 @@ BaseParser.prototype.readNumber = function () {
       this.pos += 1;
     }
   }
-  while (this.pos < this.data.length && NUM_CODES.has(this.data.charCodeAt(this.pos))) {
+  while (
+    this.pos < this.data.length &&
+    NUM_CODES.has(this.data.charCodeAt(this.pos))
+  ) {
     this.pos += 1;
   }
   var s = this.data.substring(start, this.pos);
-  var v = s.indexOf('.') !== -1 ? parseFloat(s) : parseInt(s, 10);
+  var v = s.indexOf(".") !== -1 ? parseFloat(s) : parseInt(s, 10);
   if (Number.isNaN(v)) {
-    throw new Error('invalid number ' + JSON.stringify(s) + ' at pos ' + start);
+    throw new Error("invalid number " + JSON.stringify(s) + " at pos " + start);
   }
   return v;
 };
@@ -245,7 +281,10 @@ BaseParser.prototype.readHexStr = function () {
   assert(this.data.charCodeAt(this.pos) === 0x3c, "expected '<'");
   this.pos += 1;
   var start = this.pos;
-  while (this.pos < this.data.length && this.data.charCodeAt(this.pos) !== 0x3e) {
+  while (
+    this.pos < this.data.length &&
+    this.data.charCodeAt(this.pos) !== 0x3e
+  ) {
     this.pos += 1;
   }
   var inner = this.data.substring(start, this.pos);
@@ -265,17 +304,22 @@ BaseParser.prototype.readString = function () {
   assert(this.data.charCodeAt(this.pos) === 0x28, "expected '('");
   this.pos += 1;
 
-  var result = '';
+  var result = "";
   while (this.pos < this.data.length) {
     var ch = this.data.charCodeAt(this.pos);
     if (ch === 0x5c) {
       // 转义字符情形，读取下一个被转义的内容
       this.pos += 1;
-      assert(this.pos < this.data.length && ESC_CODES.has(this.data.charCodeAt(this.pos)),
-        'unexpected escape character in string');
+      assert(
+        this.pos < this.data.length &&
+          ESC_CODES.has(this.data.charCodeAt(this.pos)),
+        "unexpected escape character in string",
+      );
       result += this.data.charAt(this.pos);
     } else if (ch === 0x28) {
-      throw new Error("Unexpected '(', it was supported to be '\\\\(', at pos=" + this.pos);
+      throw new Error(
+        "Unexpected '(', it was supported to be '\\\\(', at pos=" + this.pos,
+      );
     } else if (ch === 0x29) {
       break;
     } else {
@@ -303,7 +347,10 @@ BaseParser.prototype.readName = function () {
 
   // 名称结束符：空白、分隔符
   this.pos += 1;
-  while (this.pos < this.data.length && !NAME_END_CODES.has(this.data.charCodeAt(this.pos))) {
+  while (
+    this.pos < this.data.length &&
+    !NAME_END_CODES.has(this.data.charCodeAt(this.pos))
+  ) {
     this.pos += 1;
   }
   return this.data.substring(start, this.pos);
@@ -328,21 +375,30 @@ DictParser.prototype.constructor = DictParser;
  * 解析完成后自动移动游标。
  */
 DictParser.prototype.parseNumberOrRef = function () {
-  assert(DIGIT_CODES.has(this.data.charCodeAt(this.pos)), 'expected a digit');
+  assert(DIGIT_CODES.has(this.data.charCodeAt(this.pos)), "expected a digit");
   var a = this.readNumber();
   var savedPos = this.pos;
   this.skipWhitespace();
   // 尝试匹配引用：第二个数字 + R
-  if (this.pos < this.data.length && NUM_CODES.has(this.data.charCodeAt(this.pos))) {
+  if (
+    this.pos < this.data.length &&
+    NUM_CODES.has(this.data.charCodeAt(this.pos))
+  ) {
     var b = this.readNumber();
     this.skipWhitespace();
-    if (this.pos < this.data.length && this.data.charCodeAt(this.pos) === 0x52) { // 'R'
+    if (
+      this.pos < this.data.length &&
+      this.data.charCodeAt(this.pos) === 0x52
+    ) {
+      // 'R'
       // R 后面应当是空白或换行符或者列表结束
-      assert(this.pos + 1 >= this.data.length ||
-        ' \t\n\r\f/>]'.indexOf(this.data.charAt(this.pos + 1)) !== -1,
-        "unexpected byte after 'R'");
+      assert(
+        this.pos + 1 >= this.data.length ||
+          " \t\n\r\f/>]".indexOf(this.data.charAt(this.pos + 1)) !== -1,
+        "unexpected byte after 'R'",
+      );
       this.pos += 1; // 跳过 R
-      return [a, b, 'R'];
+      return [a, b, "R"];
     }
   }
   // 不是引用，退回
@@ -358,7 +414,7 @@ DictParser.prototype.parseArray = function () {
   this.pos += 1; // 跳过 '['
 
   // 找到 '[]' 的起点和终点
-  var end = this.data.indexOf(']', this.pos);
+  var end = this.data.indexOf("]", this.pos);
 
   // 解析内部元素
   var elements = [];
@@ -376,8 +432,12 @@ DictParser.prototype.parseArray = function () {
   }
 
   // 根据规则判断返回形式
-  function isNumber(v) { return typeof v === 'number'; }
-  function isRef(v) { return Array.isArray(v) && v.length === 3 && v[2] === 'R'; }
+  function isNumber(v) {
+    return typeof v === "number";
+  }
+  function isRef(v) {
+    return Array.isArray(v) && v.length === 3 && v[2] === "R";
+  }
 
   if (elements.length === 1 && isNumber(elements[0])) {
     return elements[0];
@@ -417,21 +477,26 @@ DictParser.prototype.parseValue = function () {
   } else if (ch === 0x5b) {
     return this.parseArray();
   } else if (ch === 0x3c) {
-    if (this.pos + 1 < this.data.length && this.data.charCodeAt(this.pos + 1) === 0x3c) {
+    if (
+      this.pos + 1 < this.data.length &&
+      this.data.charCodeAt(this.pos + 1) === 0x3c
+    ) {
       // 嵌套字典 <<...>>
       return this.parseDict();
     } else {
       // 十六进制字符串
       return this.readHexStr();
     }
-  } else if (ch === 0x74) { // 't'
-    if (this.data.substr(this.pos, 4) === 'true') {
+  } else if (ch === 0x74) {
+    // 't'
+    if (this.data.substr(this.pos, 4) === "true") {
       this.pos += 4;
       return true;
     }
     throw new Error("Expected 'true'");
-  } else if (ch === 0x66) { // 'f'
-    if (this.data.substr(this.pos, 5) === 'false') {
+  } else if (ch === 0x66) {
+    // 'f'
+    if (this.data.substr(this.pos, 5) === "false") {
       this.pos += 5;
       return false;
     }
@@ -439,14 +504,18 @@ DictParser.prototype.parseValue = function () {
   } else if (NUM_CODES.has(ch)) {
     return this.parseNumberOrRef();
   } else {
-    throw new Error('Unexpected byte ' + JSON.stringify(String.fromCharCode(ch)) +
-      ' at position ' + this.pos);
+    throw new Error(
+      "Unexpected byte " +
+        JSON.stringify(String.fromCharCode(ch)) +
+        " at position " +
+        this.pos,
+    );
   }
 };
 
 /** 解析 <<...>> 字典，返回对象，pos 应指向 '<<' */
 DictParser.prototype.parseDict = function () {
-  assert(this.data.substr(this.pos, 2) === '<<', "expected '<<'");
+  assert(this.data.substr(this.pos, 2) === "<<", "expected '<<'");
   this.pos += 2;
   var result = {};
   while (true) {
@@ -454,7 +523,7 @@ DictParser.prototype.parseDict = function () {
     if (this.pos >= this.data.length) {
       break;
     }
-    if (this.data.substr(this.pos, 2) === '>>') {
+    if (this.data.substr(this.pos, 2) === ">>") {
       this.pos += 2;
       break;
     }
@@ -482,11 +551,13 @@ function ObjStmParser(rawData, data) {
   } else if (data) {
     BaseParser.call(this, data);
   } else {
-    throw new Error('ObjStmParser requires at least one argument, rawData or data.');
+    throw new Error(
+      "ObjStmParser requires at least one argument, rawData or data.",
+    );
   }
 
   this.offsetMap = this.getOffsetMap(); // obj_id -> [start, end]
-  this.objMap = new Map();              // obj_id -> PDFObj
+  this.objMap = new Map(); // obj_id -> PDFObj
 }
 
 ObjStmParser.prototype = Object.create(BaseParser.prototype);
@@ -503,7 +574,10 @@ ObjStmParser.prototype.getOffsetMap = function () {
   // 读取所有 (对象编号, 偏移量) 对，直到遇到非数字内容
   while (true) {
     this.skipWhitespace();
-    if (this.pos >= this.data.length || !DIGIT_CODES.has(this.data.charCodeAt(this.pos))) {
+    if (
+      this.pos >= this.data.length ||
+      !DIGIT_CODES.has(this.data.charCodeAt(this.pos))
+    ) {
       break;
     }
     var objId = this.readNumber();
@@ -517,7 +591,9 @@ ObjStmParser.prototype.getOffsetMap = function () {
   var base = this.pos;
 
   // 按偏移量排序，确保顺序处理
-  pairs.sort(function (x, y) { return x[1] - y[1]; });
+  pairs.sort(function (x, y) {
+    return x[1] - y[1];
+  });
 
   var offsetMap = new Map();
   for (var i = 0; i < pairs.length; i++) {
@@ -565,9 +641,11 @@ function CMapParser(rawData, data) {
   } else if (data) {
     DictParser.call(this, data);
   } else {
-    throw new Error('CMapParser requires at least one argument, rawData or data.');
+    throw new Error(
+      "CMapParser requires at least one argument, rawData or data.",
+    );
   }
-  this._cmap = null;   // Map: int -> int
+  this._cmap = null; // Map: int -> int
   this._info = {};
 }
 
@@ -581,11 +659,14 @@ CMapParser.prototype.parseCodeSpaceRange = function (n) {
     var start = this.readHexStr();
     this.skipWhitespace();
     var end = this.readHexStr();
-    assert(start === '0000' && end === 'FFFF', 'codespacerange must be 0000~FFFF');
+    assert(
+      start === "0000" && end === "FFFF",
+      "codespacerange must be 0000~FFFF",
+    );
   }
   this.skipWhitespace();
   var w = this.readName();
-  assert(w === 'endcodespacerange');
+  assert(w === "endcodespacerange");
 };
 
 /** 解析 beginbfchar...endbfchar，将 n 对映射加入 cmap */
@@ -599,7 +680,7 @@ CMapParser.prototype.parseBfChar = function (cmap, n) {
   }
   this.skipWhitespace();
   var w = this.readName();
-  assert(w === 'endbfchar');
+  assert(w === "endbfchar");
 };
 
 /** 解析 beginbfrange...endbfrange，将 n 个范围的映射加入 cmap */
@@ -628,7 +709,7 @@ CMapParser.prototype.parseBfRange = function (cmap, n) {
   }
   this.skipWhitespace();
   var w = this.readName();
-  assert(w === 'endbfrange');
+  assert(w === "endbfrange");
 };
 
 /** 返回 CMap 映射表（int->int 的 Map），结果会被缓存 */
@@ -650,35 +731,35 @@ CMapParser.prototype.getCmap = function () {
 
     if (ch === 0x2f) {
       var name = this.readName();
-      if (name === 'CIDSystemInfo') {
+      if (name === "CIDSystemInfo") {
         this.skipWhitespace();
         var info = this.parseDict();
         this._info = info;
-        assert(info['Ordering'] === 'UCS');
-      } else if (name === 'CMapType') {
+        assert(info["Ordering"] === "UCS");
+      } else if (name === "CMapType") {
         this.skipWhitespace();
         var val = this.readNumber();
         assert(val === 2);
-      } else if (name === 'CMapName') {
+      } else if (name === "CMapName") {
         this.skipWhitespace();
         var cmapName = this.readName();
-        assert(cmapName === 'Adobe-Identity-UCS');
+        assert(cmapName === "Adobe-Identity-UCS");
       }
     } else if (DIGIT_CODES.has(ch)) {
       var n = this.readNumber();
       this.skipWhitespace();
       var w = this.readName();
-      if (w === 'beginbfchar') {
+      if (w === "beginbfchar") {
         this.parseBfChar(cmap, n);
-      } else if (w === 'beginbfrange') {
+      } else if (w === "beginbfrange") {
         this.parseBfRange(cmap, n);
-      } else if (w === 'begincodespacerange') {
+      } else if (w === "begincodespacerange") {
         this.parseCodeSpaceRange(n);
       }
       // 其他如 'dict' 直接忽略，后续 'begin' 由外层循环作为普通单词跳过
     } else {
       var w2 = this.readName();
-      if (w2 === 'endcmap') {
+      if (w2 === "endcmap") {
         break;
       }
       // 其他单词如 begin, def, findresource, pop 等直接忽略
@@ -707,34 +788,60 @@ function Rect(x, y, width, height, clip, fillColor) {
     this.y1 = Math.max(y, clip.y1);
     this.x2 = Math.min(x + width, clip.x2);
     this.y2 = Math.min(y + height, clip.y2);
-    assert(this.x1 <= this.x2 && this.y1 <= this.y2,
-      '矩形 (' + x + ', ' + y + ', ' + width + ', ' + height + ') 与裁剪区域无交集');
+    assert(
+      this.x1 <= this.x2 && this.y1 <= this.y2,
+      "矩形 (" +
+        x +
+        ", " +
+        y +
+        ", " +
+        width +
+        ", " +
+        height +
+        ") 与裁剪区域无交集",
+    );
   }
   this.fillColor = fillColor === undefined ? null : fillColor; // 填充色: g 灰度 / rg (r,g,b)，null 表示默认(黑)
 }
 
 /** 点是否在矩形内（含边界） */
 Rect.prototype.containsPoint = function (x, y) {
-  return (this.x1 <= x && x <= this.x2) && (this.y1 <= y && y <= this.y2);
+  return this.x1 <= x && x <= this.x2 && this.y1 <= y && y <= this.y2;
 };
 
 /** 矩形是否被本矩形包含（含 TOLANCE 容许误差） */
 Rect.prototype.containsRect = function (r) {
-  return (this.x1 - TOLANCE <= r.x1) && (r.x2 <= this.x2 + TOLANCE) &&
-    (this.y1 - TOLANCE <= r.y1) && (r.y2 <= this.y2 + TOLANCE);
+  return (
+    this.x1 - TOLERANCE <= r.x1 &&
+    r.x2 <= this.x2 + TOLERANCE &&
+    this.y1 - TOLERANCE <= r.y1 &&
+    r.y2 <= this.y2 + TOLERANCE
+  );
 };
 
 /** 两个矩形是否一致（含 TOLANCE 容许误差） */
 Rect.prototype.equals = function (r) {
-  return (Math.abs(r.x1 - this.x1) <= TOLANCE) &&
-    (Math.abs(r.x2 - this.x2) <= TOLANCE) &&
-    (Math.abs(r.y1 - this.y1) <= TOLANCE) &&
-    (Math.abs(r.y2 - this.y2) <= TOLANCE);
+  return (
+    Math.abs(r.x1 - this.x1) <= TOLERANCE &&
+    Math.abs(r.x2 - this.x2) <= TOLERANCE &&
+    Math.abs(r.y1 - this.y1) <= TOLERANCE &&
+    Math.abs(r.y2 - this.y2) <= TOLERANCE
+  );
 };
 
 Rect.prototype.toString = function () {
-  return 'Rect: x1=' + this.x1 + ', x2=' + this.x2 + ', y1=' + this.y1 +
-    ', y2=' + this.y2 + ', fill_color=' + this.fillColor;
+  return (
+    "Rect: x1=" +
+    this.x1 +
+    ", x2=" +
+    this.x2 +
+    ", y1=" +
+    this.y1 +
+    ", y2=" +
+    this.y2 +
+    ", fill_color=" +
+    this.fillColor
+  );
 };
 
 /**
@@ -749,7 +856,7 @@ function Line(x1, y1, x2, y2, opts) {
   this.width = opts.width;
   this.capStyle = opts.capStyle !== undefined ? opts.capStyle : 2;
   this.joinStyle = opts.joinStyle !== undefined ? opts.joinStyle : 1;
-  this.clip = opts.clip === undefined ? null : opts.clip;   // 构造时输入的 W* 裁剪矩形
+  this.clip = opts.clip === undefined ? null : opts.clip; // 构造时输入的 W* 裁剪矩形
   this.strokeColor = opts.strokeColor === undefined ? null : opts.strokeColor; // 描边色: G 灰度 / RG (r,g,b)，null 表示默认(黑)
 }
 
@@ -760,7 +867,9 @@ function Line(x1, y1, x2, y2, opts) {
 Line.prototype.rect = function () {
   // 检查 cap_style 是否为 1（圆头）
   if (this.capStyle === 1) {
-    throw new Error('cap_style 1 (round cap) is not supported for rect() because the occupied area is not rectangular');
+    throw new Error(
+      "cap_style 1 (round cap) is not supported for rect() because the occupied area is not rectangular",
+    );
   }
 
   var half = this.width / 2;
@@ -772,7 +881,8 @@ Line.prototype.rect = function () {
     var xLeft = this.x1 - half;
     var xRight = this.x1 + half;
 
-    if (this.capStyle === 2) { // square cap: extend along y direction
+    if (this.capStyle === 2) {
+      // square cap: extend along y direction
       yMin -= half;
       yMax += half;
     }
@@ -785,13 +895,16 @@ Line.prototype.rect = function () {
     var yTop = this.y1 - half;
     var yBottom = this.y1 + half;
 
-    if (this.capStyle === 2) { // square cap: extend along x direction
+    if (this.capStyle === 2) {
+      // square cap: extend along x direction
       xMin -= half;
       xMax += half;
     }
     return new Rect(xMin, yTop, xMax - xMin, this.width, this.clip);
   } else {
-    throw new Error('Line is neither horizontal nor vertical; cannot compute a rectangular bounding box');
+    throw new Error(
+      "Line is neither horizontal nor vertical; cannot compute a rectangular bounding box",
+    );
   }
 };
 
@@ -821,30 +934,48 @@ function makeScope(kind, state) {
 
 /** 一个 Tm + TJ/Tj 对应的文本片段 */
 function TextItem(font, x, y, text, parts, source, clip) {
-  this.font = font;     // 当前字体名，如 'F1'，未设置 Tf 时为 null
-  this.x = x;           // Tm 基线坐标
+  this.font = font; // 当前字体名，如 'F1'，未设置 Tf 时为 null
+  this.x = x; // Tm 基线坐标
   this.y = y;
-  this.text = text;     // 已经拼合的文字内容
-  this.parts = parts;   // 每个 TJ/Tj 指令的值，或者说尚未进行拼合的具体内容
+  this.text = text; // 已经拼合的文字内容
+  this.parts = parts; // 每个 TJ/Tj 指令的值，或者说尚未进行拼合的具体内容
   this.source = source; // 来源信息，为 '()' 或 '<>'
-  this.clip = clip;     // 裁剪矩形
+  this.clip = clip; // 裁剪矩形
 }
 
 TextItem.prototype.toString = function () {
-  return 'text: font=' + this.font + ', base_line=(' + this.x + ',' + this.y +
-    '), text=' + this.text + ', source=' + this.source + ', clip=' + this.clip;
+  return (
+    "text: font=" +
+    this.font +
+    ", base_line=(" +
+    this.x +
+    "," +
+    this.y +
+    "), text=" +
+    this.text +
+    ", source=" +
+    this.source +
+    ", clip=" +
+    this.clip
+  );
 };
 
 /** 代表一个 /P <<...>> BDC...EMC 或 /Span <<...>> BDC...EMC 标记内容块 */
 function MarkedContentBlock(markType, mcid) {
   this.markType = markType; // BDC 的构件名称：'P' 或 'Span'
-  this.mcid = mcid;         // /MCID 值，未给出时为 undefined
+  this.mcid = mcid; // /MCID 值，未给出时为 undefined
   this.textItems = [];
 }
 
 MarkedContentBlock.prototype.toString = function () {
-  return 'MarkedContentBlock: mcid=' + this.mcid + ',type=' + this.markType +
-    ', text_items=' + this.textItems;
+  return (
+    "MarkedContentBlock: mcid=" +
+    this.mcid +
+    ",type=" +
+    this.markType +
+    ", text_items=" +
+    this.textItems
+  );
 };
 
 /**
@@ -862,7 +993,9 @@ function ContentParser(rawData, data) {
   } else if (data) {
     DictParser.call(this, data);
   } else {
-    throw new Error('ContentParser requires at least one argument, rawData or data.');
+    throw new Error(
+      "ContentParser requires at least one argument, rawData or data.",
+    );
   }
 }
 
@@ -913,12 +1046,12 @@ ContentParser.prototype.parse = function () {
       // 名称: 可能是 /P /Artifact, 也可能是 Tf 的字体名等操作数
       operands.push(this.readName());
     } else if (ch === 0x28) {
-      operands.push([this.readString(), '()']);
+      operands.push([this.readString(), "()"]);
     } else if (ch === 0x3c) {
-      if (this.data.substr(this.pos, 2) === '<<') {
+      if (this.data.substr(this.pos, 2) === "<<") {
         operands.push(this.parseDict());
       } else {
-        operands.push([this.readHexStr(), '<>']);
+        operands.push([this.readHexStr(), "<>"]);
       }
     } else if (ch === 0x5b) {
       operands.push(this.readTextArray());
@@ -949,14 +1082,18 @@ ContentParser.prototype.readTextArray = function () {
       this.pos += 1;
       break;
     } else if (ch === 0x28) {
-      elements.push([this.readString(), '()']);
+      elements.push([this.readString(), "()"]);
     } else if (ch === 0x3c) {
-      elements.push([this.readHexStr(), '<>']);
+      elements.push([this.readHexStr(), "<>"]);
     } else if (NUM_CODES.has(ch)) {
       elements.push(this.readNumber());
     } else {
-      throw new Error('Unexpected byte ' + JSON.stringify(String.fromCharCode(ch)) +
-        ' in TJ array at pos=' + this.pos);
+      throw new Error(
+        "Unexpected byte " +
+          JSON.stringify(String.fromCharCode(ch)) +
+          " in TJ array at pos=" +
+          this.pos,
+      );
     }
   }
   return elements;
@@ -965,7 +1102,7 @@ ContentParser.prototype.readTextArray = function () {
 /** 当前是否位于被忽略的构件（如 /Artifact BMC...EMC）内部 */
 ContentParser.prototype._ignoring = function () {
   for (var i = 0; i < this._mcStack.length; i++) {
-    if (this._mcStack[i].kind === 'ignore') {
+    if (this._mcStack[i].kind === "ignore") {
       return true;
     }
   }
@@ -976,7 +1113,7 @@ ContentParser.prototype._ignoring = function () {
 ContentParser.prototype._nearestMcBlock = function () {
   for (var i = this._mcStack.length - 1; i >= 0; i--) {
     var frame = this._mcStack[i];
-    if (frame.kind === 'BDC' && frame.block !== null) {
+    if (frame.kind === "BDC" && frame.block !== null) {
       return frame.block;
     }
   }
@@ -987,25 +1124,27 @@ ContentParser.prototype._nearestMcBlock = function () {
 ContentParser.prototype._execute = function (op, operands) {
   var ignoring = this._ignoring();
 
-  if (op === 'q') {
+  if (op === "q") {
     if (ignoring) {
       return;
     }
-    this._gsStack.push(makeScope('q', {
-      clip: this._clip,
-      lineWidth: this._lineWidth,
-      capStyle: this._capStyle,
-      joinStyle: this._joinStyle,
-      fillColor: this._fillColor,
-      strokeColor: this._strokeColor,
-      font: this._font,
-    }));
-  } else if (op === 'Q') {
+    this._gsStack.push(
+      makeScope("q", {
+        clip: this._clip,
+        lineWidth: this._lineWidth,
+        capStyle: this._capStyle,
+        joinStyle: this._joinStyle,
+        fillColor: this._fillColor,
+        strokeColor: this._strokeColor,
+        font: this._font,
+      }),
+    );
+  } else if (op === "Q") {
     if (ignoring) {
       return;
     }
     var frame = this._gsStack.pop();
-    assert(frame !== undefined && frame.kind === 'q');
+    assert(frame !== undefined && frame.kind === "q");
     this._clip = frame.clip;
     this._lineWidth = frame.lineWidth;
     this._capStyle = frame.capStyle;
@@ -1013,59 +1152,65 @@ ContentParser.prototype._execute = function (op, operands) {
     this._fillColor = frame.fillColor;
     this._strokeColor = frame.strokeColor;
     this._font = frame.font;
-  } else if (op === 'BMC') {
+  } else if (op === "BMC") {
     operands.pop(); // /Artifact 等构件名称, 忽略
-    this._mcStack.push(makeScope('ignore'));
-  } else if (op === 'BDC') {
+    this._mcStack.push(makeScope("ignore"));
+  } else if (op === "BDC") {
     var props = operands.pop();
     var name = operands.pop();
-    assert(name === 'P' || name === 'Span', "BDC name must be 'P' or 'Span'");
+    assert(name === "P" || name === "Span", "BDC name must be 'P' or 'Span'");
     var block = null;
     if (!this._ignoring()) {
-      block = new MarkedContentBlock(name, props['MCID']);
+      block = new MarkedContentBlock(name, props["MCID"]);
       this._activeMcBlock = block;
     }
-    this._mcStack.push(makeScope('BDC', { block: block }));
-  } else if (op === 'EMC') {
+    this._mcStack.push(makeScope("BDC", { block: block }));
+  } else if (op === "EMC") {
     var frame2 = this._mcStack.pop();
-    assert(frame2 !== undefined && (frame2.kind === 'BDC' || frame2.kind === 'ignore'));
-    if (frame2.kind === 'BDC' && frame2.block !== null) {
+    assert(
+      frame2 !== undefined &&
+        (frame2.kind === "BDC" || frame2.kind === "ignore"),
+    );
+    if (frame2.kind === "BDC" && frame2.block !== null) {
       this.markedBlocks.push(frame2.block);
     }
     this._activeMcBlock = this._nearestMcBlock();
-  } else if (op === 'BT') {
+  } else if (op === "BT") {
     if (ignoring) {
       return;
     }
     // 新文本对象: 文本矩阵/文本行矩阵重置为单位矩阵
     this._textStack.push(null);
-  } else if (op === 'ET') {
+  } else if (op === "ET") {
     if (ignoring) {
       return;
     }
     assert(this._textStack.length > 0);
     this._textStack.pop();
-  } else if (op === 'Tf') {
+  } else if (op === "Tf") {
     var size = operands.pop();
     var font = operands.pop();
     if (ignoring) {
       return;
     }
     this._font = font;
-  } else if (op === 'Tm') {
+  } else if (op === "Tm") {
     var f = operands.pop();
     var e = operands.pop();
     var d = operands.pop();
     var c = operands.pop();
     var b = operands.pop();
     var a = operands.pop();
-    assert(a === 1 && b === 0 && c === 0 && d === 1, 'Tm matrix must be identity (translation only)');
+    assert(
+      a === 1 && b === 0 && c === 0 && d === 1,
+      "Tm matrix must be identity (translation only)",
+    );
     if (ignoring) {
       return;
     }
     assert(this._textStack.length > 0);
     this._textStack[this._textStack.length - 1] = [e, f];
-  } else if (op === 'TJ') {
+  } else if (op === "TJ") {
     var elements = operands.pop();
     if (ignoring) {
       return;
@@ -1073,12 +1218,15 @@ ContentParser.prototype._execute = function (op, operands) {
 
     assert(this._textStack.length > 0);
     var baseline = this._textStack[this._textStack.length - 1];
-    assert(baseline !== null && baseline !== undefined, 'TJ without Tm');
+    assert(baseline !== null && baseline !== undefined, "TJ without Tm");
     var x = baseline[0];
     var y = baseline[1];
 
     var block = this._activeMcBlock;
-    assert(block !== null && block !== undefined, 'TJ outside marked content block');
+    assert(
+      block !== null && block !== undefined,
+      "TJ outside marked content block",
+    );
 
     // 连续同源段将合并为一个 TextItem
     var groups = []; // 单个元素为 [source, [content, ...]]
@@ -1101,27 +1249,49 @@ ContentParser.prototype._execute = function (op, operands) {
     // 翻译成对应的 TextItem 类
     for (var gi = 0; gi < groups.length; gi++) {
       var group = groups[gi];
-      block.textItems.push(new TextItem(this._font, x, y,
-        group[1].join(''), group[1], group[0], this._clip));
+      block.textItems.push(
+        new TextItem(
+          this._font,
+          x,
+          y,
+          group[1].join(""),
+          group[1],
+          group[0],
+          this._clip,
+        ),
+      );
     }
-  } else if (op === 'Tj') {
+  } else if (op === "Tj") {
     var tjOperand = operands.pop();
     if (ignoring) {
       return;
     }
     assert(this._textStack.length > 0);
     var baseline2 = this._textStack[this._textStack.length - 1];
-    assert(baseline2 !== null && baseline2 !== undefined, 'Tj without Tm');
+    assert(baseline2 !== null && baseline2 !== undefined, "Tj without Tm");
     var x2 = baseline2[0];
     var y2 = baseline2[1];
     var block2 = this._activeMcBlock;
-    assert(block2 !== null && block2 !== undefined, 'Tj outside marked content block');
-    block2.textItems.push(new TextItem(this._font, x2, y2, tjOperand[0], [tjOperand[0]], tjOperand[1], this._clip));
-  } else if (op === 'Tc') {
+    assert(
+      block2 !== null && block2 !== undefined,
+      "Tj outside marked content block",
+    );
+    block2.textItems.push(
+      new TextItem(
+        this._font,
+        x2,
+        y2,
+        tjOperand[0],
+        [tjOperand[0]],
+        tjOperand[1],
+        this._clip,
+      ),
+    );
+  } else if (op === "Tc") {
     operands.pop();
-  } else if (op === 'Tr') {
+  } else if (op === "Tr") {
     operands.pop();
-  } else if (op === 're') {
+  } else if (op === "re") {
     var height = operands.pop();
     var width = operands.pop();
     var ry = operands.pop();
@@ -1129,48 +1299,58 @@ ContentParser.prototype._execute = function (op, operands) {
     if (!ignoring) {
       this._pendingRect = new Rect(rx, ry, width, height);
     }
-  } else if (op === 'W*') {
+  } else if (op === "W*") {
     if (ignoring) {
       return;
     }
-    assert(this._pendingRect !== null, 'W* without re');
+    assert(this._pendingRect !== null, "W* without re");
     var clip = this._pendingRect;
     if (this._clip === null) {
       this._clip = clip;
     } else {
       // 嵌套裁剪: 新裁剪区域与已有裁剪区域求交
-      this._clip = new Rect(this._clip.x1, this._clip.y1,
-        this._clip.x2 - this._clip.x1, this._clip.y2 - this._clip.y1, clip);
+      this._clip = new Rect(
+        this._clip.x1,
+        this._clip.y1,
+        this._clip.x2 - this._clip.x1,
+        this._clip.y2 - this._clip.y1,
+        clip,
+      );
     }
     this._pendingRect = null;
-  } else if (op === 'n') {
+  } else if (op === "n") {
     if (!ignoring) {
       this._pendingRect = null;
       this._pendingLine = null;
     }
-  } else if (op === 'f*') {
+  } else if (op === "f*") {
     if (ignoring) {
       return;
     }
-    assert(this._pendingRect !== null, 'f* without re');
+    assert(this._pendingRect !== null, "f* without re");
     var pending = this._pendingRect;
-    var rect = new Rect(pending.x1, pending.y1,
-      pending.x2 - pending.x1, pending.y2 - pending.y1,
-      this._clip, this._fillColor);
+    var rect = new Rect(
+      pending.x1,
+      pending.y1,
+      pending.x2 - pending.x1,
+      pending.y2 - pending.y1,
+      this._clip,
+      this._fillColor,
+    );
     this.rects.push(rect);
     this._pendingRect = null;
-  } else if (op === 'm') {
+  } else if (op === "m") {
     var my = operands.pop();
     var mx = operands.pop();
     if (!ignoring) {
       this._pendingLineStart = [mx, my];
       this._pendingLine = null;
     }
-  } else if (op === 'l') {
+  } else if (op === "l") {
     var ly2 = operands.pop();
     var lx2 = operands.pop();
     if (!ignoring) {
-      assert(this._pendingLineStart !== null, 'l without m');
+      assert(this._pendingLineStart !== null, "l without m");
       var x1 = this._pendingLineStart[0];
       var y1 = this._pendingLineStart[1];
       this._pendingLine = new Line(x1, y1, lx2, ly2, {
@@ -1182,46 +1362,46 @@ ContentParser.prototype._execute = function (op, operands) {
       });
       this._pendingLineStart = null;
     }
-  } else if (op === 'S') {
+  } else if (op === "S") {
     if (ignoring) {
       return;
     }
-    assert(this._pendingLine !== null, 'S without l');
+    assert(this._pendingLine !== null, "S without l");
     this.lines.push(this._pendingLine);
     this._pendingLine = null;
-  } else if (op === 'w') {
+  } else if (op === "w") {
     var value = operands.pop();
     if (!ignoring) {
       this._lineWidth = value;
     }
-  } else if (op === 'J') {
+  } else if (op === "J") {
     var value2 = operands.pop();
     if (!ignoring) {
       this._capStyle = value2;
     }
-  } else if (op === 'j') {
+  } else if (op === "j") {
     var value3 = operands.pop();
     if (!ignoring) {
       this._joinStyle = value3;
     }
-  } else if (op === 'g') {
+  } else if (op === "g") {
     var value4 = operands.pop();
     if (!ignoring) {
       this._fillColor = value4;
     }
-  } else if (op === 'G') {
+  } else if (op === "G") {
     var value5 = operands.pop();
     if (!ignoring) {
       this._strokeColor = value5;
     }
-  } else if (op === 'rg') {
+  } else if (op === "rg") {
     var blue = operands.pop();
     var green = operands.pop();
     var red = operands.pop();
     if (!ignoring) {
       this._fillColor = [red, green, blue];
     }
-  } else if (op === 'RG') {
+  } else if (op === "RG") {
     var blue2 = operands.pop();
     var green2 = operands.pop();
     var red2 = operands.pop();
@@ -1257,11 +1437,11 @@ PDFObj.prototype._getId = function () {
 
   this.parser.skipWhitespace();
   var genNumber = this.parser.readNumber();
-  assert(genNumber === 0, 'generation number must be 0');
+  assert(genNumber === 0, "generation number must be 0");
 
   this.parser.skipWhitespace();
   var keyword = this.parser.readName();
-  assert(keyword === 'obj', "expected 'obj'");
+  assert(keyword === "obj", "expected 'obj'");
 
   return id;
 };
@@ -1279,15 +1459,17 @@ PDFObj.prototype._getStream = function () {
   }
   var keyword = this.parser.readName();
 
-  if (keyword === 'endobj') {
+  if (keyword === "endobj") {
     return null;
-  } else if (keyword === 'stream') {
+  } else if (keyword === "stream") {
     this.parser.skipWhitespace();
     var start = this.parser.pos;
-    var end = this.data.indexOf('endstream');
+    var end = this.data.indexOf("endstream");
     return this.data.substring(start, end);
   } else {
-    throw new Error('Unexpected keyword ' + JSON.stringify(keyword) + ' in obj' + this.id);
+    throw new Error(
+      "Unexpected keyword " + JSON.stringify(keyword) + " in obj" + this.id,
+    );
   }
 };
 
@@ -1296,7 +1478,7 @@ PDFObj.prototype._getStream = function () {
  */
 function ContentObj(data, id) {
   PDFObj.call(this, data, id);
-  assert(this.rawStream !== null, 'ContentObj requires a stream');
+  assert(this.rawStream !== null, "ContentObj requires a stream");
   this.contentParser = new ContentParser(this.rawStream);
   this.contentParser.parse();
 
@@ -1331,7 +1513,9 @@ ContentObj.prototype.getCells = function () {
       return true;
     }
     if (Array.isArray(color)) {
-      return color.every(function (c) { return c === 0; });
+      return color.every(function (c) {
+        return c === 0;
+      });
     }
     return color === 0;
   }
@@ -1359,12 +1543,16 @@ ContentObj.prototype.getCells = function () {
     ysSet.add(round6(r.y1));
     ysSet.add(round6(r.y2));
   }
-  var xs = Array.from(xsSet).sort(function (a, b) { return a - b; });
-  var ys = Array.from(ysSet).sort(function (a, b) { return a - b; });
+  var xs = Array.from(xsSet).sort(function (a, b) {
+    return a - b;
+  });
+  var ys = Array.from(ysSet).sort(function (a, b) {
+    return a - b;
+  });
   var nx = xs.length - 1;
   var ny = ys.length - 1;
 
-  assert(nx > 0 && ny > 0, 'nx and ny must be positive');
+  assert(nx > 0 && ny > 0, "nx and ny must be positive");
 
   // 标记黑色网格单元: 网格单元被某一黑色矩形(含容差)完全覆盖即为边框
   var black = [];
@@ -1453,10 +1641,18 @@ ContentObj.prototype.getCells = function () {
     var jMax = -Infinity;
     for (var ci2 = 0; ci2 < component.length; ci2++) {
       var cell = component[ci2];
-      if (cell[0] < iMin) { iMin = cell[0]; }
-      if (cell[0] > iMax) { iMax = cell[0]; }
-      if (cell[1] < jMin) { jMin = cell[1]; }
-      if (cell[1] > jMax) { jMax = cell[1]; }
+      if (cell[0] < iMin) {
+        iMin = cell[0];
+      }
+      if (cell[0] > iMax) {
+        iMax = cell[0];
+      }
+      if (cell[1] < jMin) {
+        jMin = cell[1];
+      }
+      if (cell[1] > jMax) {
+        jMax = cell[1];
+      }
     }
     var width = iMax - iMin + 1;
     var height = jMax - jMin + 1;
@@ -1524,7 +1720,9 @@ ContentObj.prototype.getCells = function () {
       var centers = [];
       for (var bi2 = 0; bi2 < boundaries.length; bi2++) {
         var rows = boundaries[bi2];
-        centers.push((localYs[rows[0]] + localYs[rows[rows.length - 1] + 1]) / 2);
+        centers.push(
+          (localYs[rows[0]] + localYs[rows[rows.length - 1] + 1]) / 2,
+        );
       }
       return centers.reverse();
     }
@@ -1561,7 +1759,9 @@ ContentObj.prototype.getCells = function () {
       var centers = [];
       for (var bi3 = 0; bi3 < boundaries.length; bi3++) {
         var cols = boundaries[bi3];
-        centers.push((localXs[cols[0]] + localXs[cols[cols.length - 1] + 1]) / 2);
+        centers.push(
+          (localXs[cols[0]] + localXs[cols[cols.length - 1] + 1]) / 2,
+        );
       }
       return centers;
     }
@@ -1580,7 +1780,9 @@ ContentObj.prototype.getCells = function () {
         }
       }
       if (best > LINE_EDGE_TOLERANCE) {
-        throw new Error('cell edge ' + value + ' is too far from any table line');
+        throw new Error(
+          "cell edge " + value + " is too far from any table line",
+        );
       }
       return index;
     }
@@ -1644,16 +1846,29 @@ ContentObj.prototype.getCells = function () {
       var ljMax = -Infinity;
       for (var mi = 0; mi < members.length; mi++) {
         var m = members[mi];
-        if (m[0] < liMin) { liMin = m[0]; }
-        if (m[0] > liMax) { liMax = m[0]; }
-        if (m[1] < ljMin) { ljMin = m[1]; }
-        if (m[1] > ljMax) { ljMax = m[1]; }
+        if (m[0] < liMin) {
+          liMin = m[0];
+        }
+        if (m[0] > liMax) {
+          liMax = m[0];
+        }
+        if (m[1] < ljMin) {
+          ljMin = m[1];
+        }
+        if (m[1] > ljMax) {
+          ljMax = m[1];
+        }
       }
       var x1 = localXs[liMin];
       var x2 = localXs[liMax + 1];
       var y1 = localYs[ljMin];
       var y2 = localYs[ljMax + 1];
-      if (liMin === 0 || liMax === width - 1 || ljMin === 0 || ljMax === height - 1) {
+      if (
+        liMin === 0 ||
+        liMax === width - 1 ||
+        ljMin === 0 ||
+        ljMax === height - 1
+      ) {
         return; // 贴边的白色区域不是被四面包围的单元格
       }
       var cellRect = new Rect(x1, y1, x2 - x1, y2 - y1);
@@ -1663,7 +1878,10 @@ ContentObj.prototype.getCells = function () {
       var colEnd = nearestIndex(colBoundaries, cellRect.x2);
       var rowStart = nearestIndex(rowBoundaries, cellRect.y2);
       var rowEnd = nearestIndex(rowBoundaries, cellRect.y1);
-      assert(colStart < colEnd && rowStart < rowEnd, 'invalid cell logical range');
+      assert(
+        colStart < colEnd && rowStart < rowEnd,
+        "invalid cell logical range",
+      );
       cells.push({
         row_start: rowStart,
         col_start: colStart,
@@ -1676,7 +1894,7 @@ ContentObj.prototype.getCells = function () {
 
     // 按阅读顺序: 从上到下, 同一行内从左到右
     cells.sort(function (a, b) {
-      return (b.rect.y1 - a.rect.y1) || (a.rect.x1 - b.rect.x1);
+      return b.rect.y1 - a.rect.y1 || a.rect.x1 - b.rect.x1;
     });
     return {
       total_rows: rowBoundaries.length - 1,
@@ -1689,7 +1907,9 @@ ContentObj.prototype.getCells = function () {
   blackComponents.forEach(function (members) {
     tables.push(extractCells(members));
   });
-  tables = tables.filter(function (table) { return table.cells.length > 0; });
+  tables = tables.filter(function (table) {
+    return table.cells.length > 0;
+  });
 
   // 按阅读顺序排列表格本身（先预计算排序键）
   var tableKeys = tables.map(function (table) {
@@ -1697,14 +1917,22 @@ ContentObj.prototype.getCells = function () {
     var minX = Infinity;
     for (var ci3 = 0; ci3 < table.cells.length; ci3++) {
       var cell = table.cells[ci3];
-      if (cell.rect.y1 < minY) { minY = cell.rect.y1; }
-      if (cell.rect.x1 < minX) { minX = cell.rect.x1; }
+      if (cell.rect.y1 < minY) {
+        minY = cell.rect.y1;
+      }
+      if (cell.rect.x1 < minX) {
+        minX = cell.rect.x1;
+      }
     }
     return [minY, minX];
   });
-  var order = tables.map(function (_, idx) { return idx; });
+  var order = tables.map(function (_, idx) {
+    return idx;
+  });
   order.sort(function (a, b) {
-    return (tableKeys[b][0] - tableKeys[a][0]) || (tableKeys[a][1] - tableKeys[b][1]);
+    return (
+      tableKeys[b][0] - tableKeys[a][0] || tableKeys[a][1] - tableKeys[b][1]
+    );
   });
   var sortedTables = [];
   for (var oi = 0; oi < order.length; oi++) {
@@ -1747,7 +1975,7 @@ ContentObj.prototype.getTables = function () {
       cells.push(cellCopy);
     }
     cells.sort(function (a, b) {
-      return (a.row_start - b.row_start) || (a.col_start - b.col_start);
+      return a.row_start - b.row_start || a.col_start - b.col_start;
     });
     tables.push({
       total_rows: table.total_rows,
@@ -1771,7 +1999,11 @@ ContentObj.prototype.getTables = function () {
       var item = block.textItems[i];
       for (var j = 0; j < allCells.length; j++) {
         var cell = allCells[j];
-        if (item.clip !== null && item.clip !== undefined && item.clip.equals(cell.rect)) {
+        if (
+          item.clip !== null &&
+          item.clip !== undefined &&
+          item.clip.equals(cell.rect)
+        ) {
           return cell;
         }
       }
@@ -1785,8 +2017,12 @@ ContentObj.prototype.getTables = function () {
       var matches = [];
       for (var j2 = 0; j2 < allCells.length; j2++) {
         var cell2 = allCells[j2];
-        if (cell2.rect.containsPoint(item2.x, item2.y) &&
-          item2.clip !== null && item2.clip !== undefined && item2.clip.containsRect(cell2.rect)) {
+        if (
+          cell2.rect.containsPoint(item2.x, item2.y) &&
+          item2.clip !== null &&
+          item2.clip !== undefined &&
+          item2.clip.containsRect(cell2.rect)
+        ) {
           matches.push(cell2);
         }
       }
@@ -1799,7 +2035,9 @@ ContentObj.prototype.getTables = function () {
       if (locatedCell === null) {
         locatedCell = match;
       } else if (!match.rect.equals(locatedCell.rect)) {
-        throw new Error('all text baselines in one marked content block must be in the same cell');
+        throw new Error(
+          "all text baselines in one marked content block must be in the same cell",
+        );
       }
     }
     return locatedCell;
@@ -1814,8 +2052,12 @@ ContentObj.prototype.getTables = function () {
     var minX = Infinity;
     for (var i = 0; i < block.textItems.length; i++) {
       var item = block.textItems[i];
-      if (item.y > maxY) { maxY = item.y; }
-      if (item.x < minX) { minX = item.x; }
+      if (item.y > maxY) {
+        maxY = item.y;
+      }
+      if (item.x < minX) {
+        minX = item.x;
+      }
     }
     return [-maxY, minX];
   }
@@ -1835,7 +2077,7 @@ ContentObj.prototype.getTables = function () {
       cell3.marked_blocks.sort(function (a, b) {
         var ka = blockReadingKey(a);
         var kb = blockReadingKey(b);
-        return (ka[0] - kb[0]) || (ka[1] - kb[1]);
+        return ka[0] - kb[0] || ka[1] - kb[1];
       });
     }
   }
@@ -1847,8 +2089,8 @@ ContentObj.prototype.getTables = function () {
 /** 对象流对象：/Type 为 ObjStm 的间接对象 */
 function ObjStm(data, id) {
   PDFObj.call(this, data, id);
-  assert(this.rawStream !== null, 'ObjStm requires a stream');
-  assert(this.dict['Type'] === 'ObjStm', 'Type must be ObjStm');
+  assert(this.rawStream !== null, "ObjStm requires a stream");
+  assert(this.dict["Type"] === "ObjStm", "Type must be ObjStm");
   this.objstmParser = new ObjStmParser(this.rawStream);
 }
 
@@ -1862,7 +2104,7 @@ ObjStm.prototype.getObj = function (id) {
 /** CMap 对象：/ToUnicode 引用的间接对象 */
 function CMapObj(data, id) {
   PDFObj.call(this, data, id);
-  assert(this.rawStream !== null, 'CMapObj requires a stream');
+  assert(this.rawStream !== null, "CMapObj requires a stream");
   this.cmapParser = new CMapParser(this.rawStream);
   this.cmap = this.cmapParser.getCmap();
 }
@@ -1873,12 +2115,18 @@ CMapObj.prototype.constructor = CMapObj;
 /** 交叉引用流对象：/Type 为 XRef 的间接对象 */
 function XRefObj(data, id) {
   PDFObj.call(this, data, id);
-  assert(this.rawStream !== null, 'XRefObj requires a stream');
-  assert(this.dict['Type'] === 'XRef', 'Type must be XRef');
+  assert(this.rawStream !== null, "XRefObj requires a stream");
+  assert(this.dict["Type"] === "XRef", "Type must be XRef");
 
-  this.w = this.dict['W'];
-  assert(Array.isArray(this.w) && this.w.length === 3 && this.w.every(function (v) { return Number.isInteger(v); }),
-    'W must be a 3-element integer array');
+  this.w = this.dict["W"];
+  assert(
+    Array.isArray(this.w) &&
+      this.w.length === 3 &&
+      this.w.every(function (v) {
+        return Number.isInteger(v);
+      }),
+    "W must be a 3-element integer array",
+  );
 
   this.stream = inflate(this.rawStream);
 
@@ -1903,11 +2151,12 @@ XRefObj.prototype.getXref = function () {
       continue;
     } else if (objType === 1 || objType === 2) {
       var num2 = readBigEndian(this.stream, i + this.w[0], this.w[1]);
-      var num3 = readBigEndian(this.stream, i + this.w[0] + this.w[1], this.w[2]);
-      // 与 Python 版一致：记录编号 = i // 7
-      // （本项目的 Excel 导出 PDF 中 W 均为 [1 4 2]，记录宽度恰为 7，
-      //   因此记录编号就等于对象编号）
-      result.set(Math.floor(i / 7), [objType, num2, num3]);
+      var num3 = readBigEndian(
+        this.stream,
+        i + this.w[0] + this.w[1],
+        this.w[2],
+      );
+      result.set(Math.floor(i / width), [objType, num2, num3]);
     }
   }
   return result;
@@ -1928,7 +2177,7 @@ function Page(pageIndex, pageObj, contentObj, decodeMap) {
 
 /** 将标记内容块中的所有文本按字体解码拼接为字符串 */
 Page.prototype.decodeText = function (block) {
-  var text = '';
+  var text = "";
   for (var i = 0; i < block.textItems.length; i++) {
     var item = block.textItems[i];
     text += this.decodeMap[item.font](item.text);
@@ -1959,7 +2208,10 @@ Page.prototype.getTables = function () {
         row_span: rawCell.row_span,
         col_span: rawCell.col_span,
         bbox: rawCell.bbox,
-        text: rawCell.marked_blocks.length > 0 ? self.decodeText(rawCell.marked_blocks[0]) : '',
+        text:
+          rawCell.marked_blocks.length > 0
+            ? self.decodeText(rawCell.marked_blocks[0])
+            : "",
       });
     }
     table.cells = cells;
@@ -1982,20 +2234,26 @@ Page.prototype.getTables = function () {
  *   .extract_table([index, ...])        -> {pageIndex: [table, ...]}
  */
 function PDFTableExtractor(pathOrBytes) {
-  if (typeof pathOrBytes === 'string') {
-    if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+  if (typeof pathOrBytes === "string") {
+    if (
+      typeof process !== "undefined" &&
+      process.versions &&
+      process.versions.node
+    ) {
       // Node.js 环境：按路径读取文件
-      var fs = require('fs');
+      var fs = require("fs");
       this.data = bytesToLatin1(fs.readFileSync(pathOrBytes));
     } else {
-      throw new Error('PDFTableExtractor: a file path is only supported in Node.js; pass bytes (Uint8Array/ArrayBuffer) in the browser');
+      throw new Error(
+        "PDFTableExtractor: a file path is only supported in Node.js; pass bytes (Uint8Array/ArrayBuffer) in the browser",
+      );
     }
   } else if (pathOrBytes instanceof Uint8Array) {
     this.data = bytesToLatin1(pathOrBytes);
   } else if (pathOrBytes instanceof ArrayBuffer) {
     this.data = bytesToLatin1(new Uint8Array(pathOrBytes));
   } else {
-    throw new Error('PDFTableExtractor: expected a file path or binary bytes');
+    throw new Error("PDFTableExtractor: expected a file path or binary bytes");
   }
 
   this._parser = new DictParser(this.data);
@@ -2004,19 +2262,19 @@ function PDFTableExtractor(pathOrBytes) {
 
   this._objMap = new Map();
 
-  this._catalogObj = this._getObj(this._xrefObj.dict['Root'], 'PDFObj');
-  this._metadataObj = this._getObj(this._xrefObj.dict['Info'], 'PDFObj');
+  this._catalogObj = this._getObj(this._xrefObj.dict["Root"], "PDFObj");
+  this._metadataObj = this._getObj(this._xrefObj.dict["Info"], "PDFObj");
 
   this.metadata = this._getMetadata();
 
-  this._pagesRoot = this._getObj(this._catalogObj.dict['Pages'], 'PDFObj');
+  this._pagesRoot = this._getObj(this._catalogObj.dict["Pages"], "PDFObj");
 
   this.pages = this._getPages();
 }
 
 PDFTableExtractor.prototype._getXref = function () {
-  var pos = this.data.lastIndexOf('startxref');
-  assert(pos !== -1, 'startxref not found');
+  var pos = this.data.lastIndexOf("startxref");
+  assert(pos !== -1, "startxref not found");
   this._parser.pos = pos;
   this._parser.readName(); // 'startxref'
   this._parser.skipWhitespace();
@@ -2025,7 +2283,7 @@ PDFTableExtractor.prototype._getXref = function () {
   this._parser.pos = startxref;
 
   var keyword1 = this._parser.readName();
-  assert(keyword1 === 'xref', "expected 'xref'");
+  assert(keyword1 === "xref", "expected 'xref'");
   this._parser.skipWhitespace();
 
   this._parser.readNumber(); // 子区段起始对象号
@@ -2035,12 +2293,12 @@ PDFTableExtractor.prototype._getXref = function () {
 
   var keyword2 = this._parser.readName();
   this._parser.skipWhitespace();
-  assert(keyword2 === 'trailer', "expected 'trailer'");
+  assert(keyword2 === "trailer", "expected 'trailer'");
 
   var trailerDict = this._parser.parseDict();
 
-  var start = trailerDict['XRefStm'];
-  var end = this.data.indexOf('endobj', start) + 6;
+  var start = trailerDict["XRefStm"];
+  var end = this.data.indexOf("endobj", start) + 6;
   this._xrefObj = new XRefObj(this.data.substring(start, end));
 
   return this._xrefObj.getXref();
@@ -2053,12 +2311,12 @@ PDFTableExtractor.prototype._getXref = function () {
  */
 PDFTableExtractor.prototype._getObj = function (idOrRef, type) {
   var objId;
-  if (typeof idOrRef === 'number') {
+  if (typeof idOrRef === "number") {
     objId = idOrRef;
   } else if (Array.isArray(idOrRef)) {
     objId = idOrRef[0];
   } else {
-    throw new Error('invalid object reference: ' + idOrRef);
+    throw new Error("invalid object reference: " + idOrRef);
   }
 
   if (this._objMap.has(objId)) {
@@ -2067,34 +2325,34 @@ PDFTableExtractor.prototype._getObj = function (idOrRef, type) {
 
   var entry = this._xref.get(objId);
   if (entry === undefined) {
-    throw new Error('object ' + objId + ' not found in xref');
+    throw new Error("object " + objId + " not found in xref");
   }
 
   var obj;
   if (entry[0] === 1) {
     var start = entry[1];
-    var end = this.data.indexOf('endobj', start) + 6;
+    var end = this.data.indexOf("endobj", start) + 6;
     var slice = this.data.substring(start, end);
 
-    if (type === 'PDFObj') {
+    if (type === "PDFObj") {
       obj = new PDFObj(slice);
-    } else if (type === 'CMapObj') {
+    } else if (type === "CMapObj") {
       obj = new CMapObj(slice);
-    } else if (type === 'ObjStm') {
+    } else if (type === "ObjStm") {
       obj = new ObjStm(slice);
-    } else if (type === 'ContentObj') {
+    } else if (type === "ContentObj") {
       obj = new ContentObj(slice);
     } else {
-      throw new Error('Unsupported obj type ' + type);
+      throw new Error("Unsupported obj type " + type);
     }
     this._objMap.set(obj.id, obj);
   } else if (entry[0] === 2) {
     var parentId = entry[1];
-    var parentObj = this._getObj(parentId, 'ObjStm');
+    var parentObj = this._getObj(parentId, "ObjStm");
     obj = parentObj.getObj(objId);
     this._objMap.set(obj.id, obj);
   } else {
-    throw new Error('unsupported xref entry type ' + entry[0]);
+    throw new Error("unsupported xref entry type " + entry[0]);
   }
 
   return obj;
@@ -2109,8 +2367,12 @@ PDFTableExtractor.prototype._getMetadata = function () {
       continue;
     }
     var value = metaData[key];
-    if ((key === 'Producer' || key === 'Creator') &&
-      value.length >= 2 && value.charCodeAt(0) === 0xfe && value.charCodeAt(1) === 0xff) {
+    if (
+      (key === "Producer" || key === "Creator") &&
+      value.length >= 2 &&
+      value.charCodeAt(0) === 0xfe &&
+      value.charCodeAt(1) === 0xff
+    ) {
       metadata[key] = utf16beDecode(value);
     } else {
       metadata[key] = utf8Decode(value);
@@ -2123,17 +2385,17 @@ PDFTableExtractor.prototype._getMetadata = function () {
 PDFTableExtractor.prototype._getPages = function () {
   var pageList = [];
   var self = this;
-  var kids = this._pagesRoot.dict['Kids'];
+  var kids = this._pagesRoot.dict["Kids"];
 
   for (var index = 0; index < kids.length; index++) {
     var ref = kids[index];
     var pageObjId = ref[0];
-    var pageObj = this._getObj(pageObjId, 'PDFObj');
+    var pageObj = this._getObj(pageObjId, "PDFObj");
 
-    var contentRef = pageObj.dict['Contents'];
-    var contentObj = this._getObj(contentRef, 'ContentObj');
+    var contentRef = pageObj.dict["Contents"];
+    var contentObj = this._getObj(contentRef, "ContentObj");
 
-    var fontRefs = pageObj.dict['Resources']['Font'];
+    var fontRefs = pageObj.dict["Resources"]["Font"];
 
     var decodeMap = {}; // font_name -> decode callback
     for (var fontName in fontRefs) {
@@ -2141,27 +2403,33 @@ PDFTableExtractor.prototype._getPages = function () {
         continue;
       }
       var fontRef = fontRefs[fontName];
-      var fontObj = this._getObj(fontRef, 'PDFObj');
-      var encoding = fontObj.dict['Encoding'];
-      assert(encoding === 'WinAnsiEncoding' || encoding === 'Identity-H',
-        'unsupported font encoding ' + encoding);
-      assert(!Object.prototype.hasOwnProperty.call(fontObj.dict, 'Differences'),
-        'Differences is not supported');
+      var fontObj = this._getObj(fontRef, "PDFObj");
+      var encoding = fontObj.dict["Encoding"];
+      assert(
+        encoding === "WinAnsiEncoding" || encoding === "Identity-H",
+        "unsupported font encoding " + encoding,
+      );
+      assert(
+        !Object.prototype.hasOwnProperty.call(fontObj.dict, "Differences"),
+        "Differences is not supported",
+      );
 
-      if (encoding === 'WinAnsiEncoding') {
+      if (encoding === "WinAnsiEncoding") {
         decodeMap[fontName] = function (text) {
           return utf8Decode(text);
         };
-      } else if (encoding === 'Identity-H') {
-        var cmapRef = fontObj.dict['ToUnicode'];
-        var cmapObj = this._getObj(cmapRef, 'CMapObj');
+      } else if (encoding === "Identity-H") {
+        var cmapRef = fontObj.dict["ToUnicode"];
+        var cmapObj = this._getObj(cmapRef, "CMapObj");
         var cmap = cmapObj.cmap;
         decodeMap[fontName] = (function (cmap) {
           return function (text) {
             // 每 4 个十六进制字符转为一个 CID
-            var out = '';
+            var out = "";
             for (var i = 0; i < text.length; i += 4) {
-              out += String.fromCodePoint(cmap.get(parseInt(text.substr(i, 4), 16)));
+              out += String.fromCodePoint(
+                cmap.get(parseInt(text.substr(i, 4), 16)),
+              );
             }
             return out;
           };
@@ -2210,26 +2478,33 @@ PDFTableExtractor.prototype.extract_table = function () {
     if (Number.isInteger(arg)) {
       var index = arg;
       if (!(0 <= index && index < this.pages.length)) {
-        throw new RangeError('Page index ' + index + ' out of range');
+        throw new RangeError("Page index " + index + " out of range");
       }
       return this.pages[index].getTables();
     } else if (Array.isArray(arg)) {
-      if (!arg.every(function (p) { return Number.isInteger(p); })) {
-        throw new TypeError('List elements must be integers');
+      if (
+        !arg.every(function (p) {
+          return Number.isInteger(p);
+        })
+      ) {
+        throw new TypeError("List elements must be integers");
       }
       indexList = arg;
     } else {
-      throw new TypeError('Unsupported argument type: ' + (typeof arg === 'number' ? 'float' : typeof arg));
+      throw new TypeError(
+        "Unsupported argument type: " +
+          (typeof arg === "number" ? "float" : typeof arg),
+      );
     }
   } else if (args.length === 2) {
     var start = args[0];
     var end = args[1];
-    if (typeof start !== 'number' || typeof end !== 'number') {
-      throw new TypeError('start and end must be integers');
+    if (typeof start !== "number" || typeof end !== "number") {
+      throw new TypeError("start and end must be integers");
     }
     indexList = sliceRange(this.pages.length, start, end);
   } else {
-    throw new TypeError('Expected 0, 1, or 2 arguments');
+    throw new TypeError("Expected 0, 1, or 2 arguments");
   }
 
   // 统一处理页面索引列表
@@ -2237,7 +2512,7 @@ PDFTableExtractor.prototype.extract_table = function () {
   for (var j = 0; j < indexList.length; j++) {
     var i2 = indexList[j];
     if (!(0 <= i2 && i2 < this.pages.length)) {
-      throw new RangeError('Page index ' + i2 + ' out of range');
+      throw new RangeError("Page index " + i2 + " out of range");
     }
     tables[i2] = this.pages[i2].getTables();
   }
@@ -2245,7 +2520,8 @@ PDFTableExtractor.prototype.extract_table = function () {
 };
 
 // 与 Python 版一致的 snake_case 接口
-PDFTableExtractor.prototype.extractTable = PDFTableExtractor.prototype.extract_table;
+PDFTableExtractor.prototype.extractTable =
+  PDFTableExtractor.prototype.extract_table;
 
 /**
  * 预解压（浏览器）：解析 xref 并收集 PDF 中全部流对象，
@@ -2264,35 +2540,43 @@ PDFTableExtractor.prepareStreams = async function (bytes) {
   var parser = new DictParser(data);
 
   // 1. startxref -> xref 表 -> trailer -> XRefStm（与 _getXref 相同的解析路径）
-  var pos = data.lastIndexOf('startxref');
-  assert(pos !== -1, 'startxref not found');
+  var pos = data.lastIndexOf("startxref");
+  assert(pos !== -1, "startxref not found");
   parser.pos = pos;
   parser.readName(); // 'startxref'
   parser.skipWhitespace();
   var startxref = parser.readNumber();
   parser.pos = startxref;
-  assert(parser.readName() === 'xref', "expected 'xref'");
+  assert(parser.readName() === "xref", "expected 'xref'");
   parser.skipWhitespace();
   parser.readNumber(); // 子区段起始对象号
   parser.skipWhitespace();
   parser.readNumber(); // 子区段对象数量
   parser.skipWhitespace();
-  assert(parser.readName() === 'trailer', "expected 'trailer'");
+  assert(parser.readName() === "trailer", "expected 'trailer'");
   parser.skipWhitespace();
   var trailerDict = parser.parseDict();
-  var xrefStm = trailerDict['XRefStm'];
-  var xrefEnd = data.indexOf('endobj', xrefStm) + 6;
+  var xrefStm = trailerDict["XRefStm"];
+  var xrefEnd = data.indexOf("endobj", xrefStm) + 6;
   var xrefSlice = data.substring(xrefStm, xrefEnd);
 
   // 2. 解析 xref 对象（字典 + 原始流），先解压 xref 流以得到交叉引用表
   var xrefObj = new PDFObj(xrefSlice);
-  assert(xrefObj.dict['Type'] === 'XRef', 'Type must be XRef');
-  var w = xrefObj.dict['W'];
-  assert(Array.isArray(w) && w.length === 3 && w.every(function (v) { return Number.isInteger(v); }),
-    'W must be a 3-element integer array');
+  assert(xrefObj.dict["Type"] === "XRef", "Type must be XRef");
+  var w = xrefObj.dict["W"];
+  assert(
+    Array.isArray(w) &&
+      w.length === 3 &&
+      w.every(function (v) {
+        return Number.isInteger(v);
+      }),
+    "W must be a 3-element integer array",
+  );
   var width = w[0] + w[1] + w[2];
 
-  var xrefBytes = await inflateWithDecompressionStream(latin1ToBytes(xrefObj.rawStream));
+  var xrefBytes = await inflateWithDecompressionStream(
+    latin1ToBytes(xrefObj.rawStream),
+  );
   var xref = new Map(); // obj_id -> [type, num2, num3]
   for (var i = 0; i + width <= xrefBytes.length; i += width) {
     var objType = readBigEndian(xrefBytes, i, w[0]);
@@ -2313,8 +2597,8 @@ PDFTableExtractor.prepareStreams = async function (bytes) {
   //    主解析器从不构造它们。这里只按 'stream' / 'endobj' 关键字顺序判断是否为
   //    流对象，并提取原始流字节（与 PDFObj._getStream 的取流逻辑一致）。
   function extractRawStream(slice) {
-    var s = slice.indexOf('stream');
-    var e = slice.indexOf('endobj');
+    var s = slice.indexOf("stream");
+    var e = slice.indexOf("endobj");
     if (s === -1 || (e !== -1 && e < s)) {
       return null;
     }
@@ -2322,7 +2606,7 @@ PDFTableExtractor.prepareStreams = async function (bytes) {
     while (p < slice.length && WS_CODES.has(slice.charCodeAt(p))) {
       p += 1;
     }
-    var es = slice.indexOf('endstream');
+    var es = slice.indexOf("endstream");
     if (es === -1 || es < p) {
       return null;
     }
@@ -2335,7 +2619,7 @@ PDFTableExtractor.prepareStreams = async function (bytes) {
       return;
     }
     var start2 = entry[1];
-    var end2 = data.indexOf('endobj', start2) + 6;
+    var end2 = data.indexOf("endobj", start2) + 6;
     var raw = extractRawStream(data.substring(start2, end2));
     if (raw !== null) {
       rawList.push(raw);
@@ -2346,11 +2630,15 @@ PDFTableExtractor.prepareStreams = async function (bytes) {
 
   // 4. 异步并行解压全部流
   var cache = new Map();
-  await Promise.all(rawList.map(function (raw) {
-    return inflateWithDecompressionStream(latin1ToBytes(raw)).then(function (decoded) {
-      cache.set(raw, decoded);
-    });
-  }));
+  await Promise.all(
+    rawList.map(function (raw) {
+      return inflateWithDecompressionStream(latin1ToBytes(raw)).then(
+        function (decoded) {
+          cache.set(raw, decoded);
+        },
+      );
+    }),
+  );
 
   return cache;
 };
@@ -2367,7 +2655,7 @@ PDFTableExtractor.create = async function (bytes) {
 
 // ---------------- 导出 ----------------
 // 兼容 Node.js（CommonJS）与浏览器（直接作为全局使用）
-if (typeof module !== 'undefined' && module.exports) {
+if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     PDFTableExtractor: PDFTableExtractor,
     Page: Page,

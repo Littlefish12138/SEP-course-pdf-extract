@@ -1542,8 +1542,8 @@ class PDFTableExtractor:
                 raise ValueError(f'Unsupported obj type {type}')
             self._obj_map[obj.id] = obj
 
-        elif self._xref[id][0] == 2:
-            parent_id = self._xref[id][1]
+        elif self._xref[obj_id][0] == 2:
+            parent_id = self._xref[obj_id][1]
             parent_obj: ObjStm = self._get_obj(parent_id, 'ObjStm')
             obj = parent_obj.get_obj(obj_id)
             self._obj_map[obj.id] = obj
