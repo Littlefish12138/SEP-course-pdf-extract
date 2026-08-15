@@ -10,10 +10,11 @@
  *
  * 本文件不依赖任何 Node.js 专有语法，可在浏览器与 Node.js 中运行：
  *  - Node.js 下自动使用内置 zlib 解压
- *  - 浏览器下自动使用全局 pako.inflate（见 html/index.html 中的内联版本）
+ *  - 浏览器下自动使用原生 DecompressionStream（异步）；若提供全局 pako 则回退到 pako
  *
- * 对外暴露 PDFTableExtractor 等类，接口与 Python 版一致：
- *   const ex = new PDFTableExtractor(path_or_bytes);
+ * 由于 FlateDecode 解压是异步的（浏览器 DecompressionStream），构造统一走静态异步
+ * 工厂 PDFTableExtractor.create()，构造完成后提取接口保持同步：
+ *   const ex = await PDFTableExtractor.create(path_or_bytes);
  *   ex.extract_table()            // 全部页面 -> {pageIndex: [table, ...]}
  *   ex.extract_table(1)           // 单页 -> [table, ...]
  *   ex.extract_table(0, 3)        // 左闭右开区间 -> {0: ..., 1: ..., 2: ...}
@@ -126,75 +127,41 @@ function sliceRange(len, start, end) {
 }
 
 // ---------------- zlib inflate 钩子 ----------------
-// 对应 Python 的 zlib.decompress：
-// - Node.js 用内置 zlib
-// - 浏览器可用全局 pako（旧方案），或先通过 PDFTableExtractor.prepareStreams()
-//   用原生 DecompressionStream 预解压全部流并填充 inflateCache（新方案）
-var inflateImpl = null;
-var inflateCache = null; // Map: 原始流 latin1 字符串 -> 已解压 Uint8Array（预解压缓存）
+// 对应 Python 的 zlib.decompress。整个解析链路是"异步工厂"式：构造函数只接收
+// 已解压的数据，解压统一收敛到唯一一个异步入口 inflateAsync(latin1Str) -> Uint8Array。
+// - Node.js 用内置 zlib（同步 inflateSync 包装成 Promise）
+// - 浏览器优先用原生 DecompressionStream（异步）
+// - 页面若提供全局 pako，则用 pako（同步，包装成 Promise）
+var inflateAsync = null;
 
-function inflate(latin1Str) {
-  if (inflateCache !== null && inflateCache.has(latin1Str)) {
-    return inflateCache.get(latin1Str);
+/**
+ * 用全局 pako 解压（同步）。
+ * pako 不忽略 deflate 流之后的尾随数据（Python/Node 的 zlib 会忽略），
+ * 因此失败时从尾部逐字节截断重试，找到真正的流结束位置。
+ */
+function pakoInflateBytes(bytes) {
+  var pako = globalThis.pako;
+  var out = null;
+  try {
+    out = pako.inflate(bytes);
+  } catch (e) {
+    out = null;
   }
-  if (!inflateImpl) {
-    throw new Error(
-      "zlib inflate implementation not available (need Node.js zlib or global pako)",
-    );
+  if (out) {
+    return out;
   }
-  return inflateImpl(latin1Str);
+  for (var n = bytes.length - 1; n >= Math.max(0, bytes.length - 64); n--) {
+    try {
+      out = pako.inflate(bytes.subarray(0, n));
+    } catch (e2) {
+      out = null;
+    }
+    if (out) {
+      return out;
+    }
+  }
+  throw new Error("zlib inflate failed: " + bytes.length + " bytes");
 }
-
-/** 设置/清空预解压缓存（配合 PDFTableExtractor.prepareStreams 使用） */
-function setInflateCache(cache) {
-  inflateCache = cache;
-}
-
-(function installInflate() {
-  if (
-    typeof process !== "undefined" &&
-    process.versions &&
-    process.versions.node
-  ) {
-    // Node.js 环境
-    var zlib = require("zlib");
-    inflateImpl = function (s) {
-      return zlib.inflateSync(latin1ToBytes(s));
-    };
-  } else if (
-    typeof globalThis !== "undefined" &&
-    globalThis.pako &&
-    typeof globalThis.pako.inflate === "function"
-  ) {
-    // 浏览器环境：全局 pako（未内联 pako 时此分支不生效）。
-    // pako 不忽略 deflate 流之后的尾随数据（Python/Node 的 zlib 会忽略），
-    // 因此失败时从尾部逐字节截断重试，找到真正的流结束位置。
-    inflateImpl = function (s) {
-      var bytes = latin1ToBytes(s);
-      var pako = globalThis.pako;
-      var out = null;
-      try {
-        out = pako.inflate(bytes);
-      } catch (e) {
-        out = null;
-      }
-      if (out) {
-        return out;
-      }
-      for (var n = bytes.length - 1; n >= Math.max(0, bytes.length - 64); n--) {
-        try {
-          out = pako.inflate(bytes.subarray(0, n));
-        } catch (e2) {
-          out = null;
-        }
-        if (out) {
-          return out;
-        }
-      }
-      throw new Error("zlib inflate failed: " + bytes.length + " bytes");
-    };
-  }
-})();
 
 /**
  * 用浏览器原生 DecompressionStream('deflate') 解压（异步）。
@@ -225,6 +192,34 @@ async function inflateWithDecompressionStream(bytes) {
     throw e;
   }
 }
+
+(function installInflate() {
+  if (
+    typeof process !== "undefined" &&
+    process.versions &&
+    process.versions.node
+  ) {
+    // Node.js 环境
+    var zlib = require("zlib");
+    inflateAsync = async function (latin1Str) {
+      return zlib.inflateSync(latin1ToBytes(latin1Str));
+    };
+  } else if (
+    typeof globalThis !== "undefined" &&
+    globalThis.pako &&
+    typeof globalThis.pako.inflate === "function"
+  ) {
+    // 浏览器环境：全局 pako（未内联 pako 时此分支不生效）
+    inflateAsync = async function (latin1Str) {
+      return pakoInflateBytes(latin1ToBytes(latin1Str));
+    };
+  } else {
+    // 浏览器环境：原生 DecompressionStream
+    inflateAsync = async function (latin1Str) {
+      return inflateWithDecompressionStream(latin1ToBytes(latin1Str));
+    };
+  }
+})();
 
 // =======================  解析器类  =======================
 
@@ -543,22 +538,19 @@ DictParser.prototype.parseDict = function () {
  * 对象流解析器：解析 /Type 为 /ObjStm 的内容流。
  * 按需解析并缓存内部对象，offset_map: obj_id -> [start, end]。
  */
-function ObjStmParser(rawData, data) {
-  if (rawData) {
-    this.rawData = rawData;
-    var decoded = inflate(rawData);
-    BaseParser.call(this, bytesToLatin1(decoded));
-  } else if (data) {
-    BaseParser.call(this, data);
-  } else {
-    throw new Error(
-      "ObjStmParser requires at least one argument, rawData or data.",
-    );
-  }
+function ObjStmParser(data) {
+  // data: 已解压的 latin1 字符串
+  BaseParser.call(this, data);
 
   this.offsetMap = this.getOffsetMap(); // obj_id -> [start, end]
   this.objMap = new Map(); // obj_id -> PDFObj
 }
+
+/** 静态异步工厂：解压 rawData 后构造 ObjStmParser */
+ObjStmParser.create = async function (rawData) {
+  var decoded = await inflateAsync(rawData);
+  return new ObjStmParser(bytesToLatin1(decoded));
+};
 
 ObjStmParser.prototype = Object.create(BaseParser.prototype);
 ObjStmParser.prototype.constructor = ObjStmParser;
@@ -633,21 +625,18 @@ ObjStmParser.prototype.parse = function () {
 /**
  * CMap 解析器：解析 ToUnicode CMap 内容流，支持 bfchar 与 bfrange（含数组形式）。
  */
-function CMapParser(rawData, data) {
-  if (rawData) {
-    this.rawData = rawData;
-    var decoded = inflate(rawData);
-    DictParser.call(this, bytesToLatin1(decoded));
-  } else if (data) {
-    DictParser.call(this, data);
-  } else {
-    throw new Error(
-      "CMapParser requires at least one argument, rawData or data.",
-    );
-  }
+function CMapParser(data) {
+  // data: 已解压的 latin1 字符串
+  DictParser.call(this, data);
   this._cmap = null; // Map: int -> int
   this._info = {};
 }
+
+/** 静态异步工厂：解压 rawData 后构造 CMapParser */
+CMapParser.create = async function (rawData) {
+  var decoded = await inflateAsync(rawData);
+  return new CMapParser(bytesToLatin1(decoded));
+};
 
 CMapParser.prototype = Object.create(DictParser.prototype);
 CMapParser.prototype.constructor = CMapParser;
@@ -985,19 +974,16 @@ MarkedContentBlock.prototype.toString = function () {
  * - lines: 使用 m l S 画出的线列表（保存时附带当时的裁剪区域）
  * - markedBlocks: /P <<...>> BDC...EMC 标记内容块列表
  */
-function ContentParser(rawData, data) {
-  if (rawData) {
-    this.rawData = rawData;
-    var decoded = inflate(rawData);
-    DictParser.call(this, bytesToLatin1(decoded));
-  } else if (data) {
-    DictParser.call(this, data);
-  } else {
-    throw new Error(
-      "ContentParser requires at least one argument, rawData or data.",
-    );
-  }
+function ContentParser(data) {
+  // data: 已解压的 latin1 字符串
+  DictParser.call(this, data);
 }
+
+/** 静态异步工厂：解压 rawData 后构造 ContentParser */
+ContentParser.create = async function (rawData) {
+  var decoded = await inflateAsync(rawData);
+  return new ContentParser(bytesToLatin1(decoded));
+};
 
 ContentParser.prototype = Object.create(DictParser.prototype);
 ContentParser.prototype.constructor = ContentParser;
@@ -1479,12 +1465,19 @@ PDFObj.prototype._getStream = function () {
 function ContentObj(data, id) {
   PDFObj.call(this, data, id);
   assert(this.rawStream !== null, "ContentObj requires a stream");
-  this.contentParser = new ContentParser(this.rawStream);
-  this.contentParser.parse();
+  this.contentParser = null; // 由 ContentObj.create 填充
 
   this._cells = null;
   this._tables = null;
 }
+
+/** 静态异步工厂：解压内容流后构造并解析 ContentObj */
+ContentObj.create = async function (slice) {
+  var obj = new ContentObj(slice);
+  obj.contentParser = await ContentParser.create(obj.rawStream);
+  obj.contentParser.parse();
+  return obj;
+};
 
 ContentObj.prototype = Object.create(PDFObj.prototype);
 ContentObj.prototype.constructor = ContentObj;
@@ -2091,8 +2084,15 @@ function ObjStm(data, id) {
   PDFObj.call(this, data, id);
   assert(this.rawStream !== null, "ObjStm requires a stream");
   assert(this.dict["Type"] === "ObjStm", "Type must be ObjStm");
-  this.objstmParser = new ObjStmParser(this.rawStream);
+  this.objstmParser = null; // 由 ObjStm.create 填充
 }
+
+/** 静态异步工厂：解压对象流后构造 ObjStm */
+ObjStm.create = async function (slice) {
+  var obj = new ObjStm(slice);
+  obj.objstmParser = await ObjStmParser.create(obj.rawStream);
+  return obj;
+};
 
 ObjStm.prototype = Object.create(PDFObj.prototype);
 ObjStm.prototype.constructor = ObjStm;
@@ -2105,9 +2105,17 @@ ObjStm.prototype.getObj = function (id) {
 function CMapObj(data, id) {
   PDFObj.call(this, data, id);
   assert(this.rawStream !== null, "CMapObj requires a stream");
-  this.cmapParser = new CMapParser(this.rawStream);
-  this.cmap = this.cmapParser.getCmap();
+  this.cmapParser = null; // 由 CMapObj.create 填充
+  this.cmap = null;
 }
+
+/** 静态异步工厂：解压 CMap 流后构造 CMapObj */
+CMapObj.create = async function (slice) {
+  var obj = new CMapObj(slice);
+  obj.cmapParser = await CMapParser.create(obj.rawStream);
+  obj.cmap = obj.cmapParser.getCmap();
+  return obj;
+};
 
 CMapObj.prototype = Object.create(PDFObj.prototype);
 CMapObj.prototype.constructor = CMapObj;
@@ -2128,10 +2136,17 @@ function XRefObj(data, id) {
     "W must be a 3-element integer array",
   );
 
-  this.stream = inflate(this.rawStream);
-
-  this.xref = this.getXref();
+  this.stream = null; // 已解压的 Uint8Array，由 XRefObj.create 填充
+  this.xref = null;
 }
+
+/** 静态异步工厂：解压 xref 流后构造 XRefObj */
+XRefObj.create = async function (slice) {
+  var obj = new XRefObj(slice);
+  obj.stream = await inflateAsync(obj.rawStream);
+  obj.xref = obj.getXref();
+  return obj;
+};
 
 XRefObj.prototype = Object.create(PDFObj.prototype);
 XRefObj.prototype.constructor = XRefObj;
@@ -2224,8 +2239,10 @@ Page.prototype.getTables = function () {
 
 /**
  * PDF 表格提取器：入口类。
- * 对外接口与 Python 版一致：
- *   new PDFTableExtractor(path_or_bytes)
+ * 由于 FlateDecode 解压是异步的（浏览器 DecompressionStream），对象图构造也统一
+ * 走静态异步工厂 PDFTableExtractor.create()：构造函数只接收已读取的 latin1 数据并
+ * 保持同步，真正需要解压的步骤全部在 create 的异步链上完成。
+ * 构造完成后，提取接口是同步的：
  *   .metadata       Info 字典（Producer/Creator 等）
  *   .pages          页面列表
  *   .extract_table()                    -> {pageIndex: [table, ...]}
@@ -2233,7 +2250,24 @@ Page.prototype.getTables = function () {
  *   .extract_table(start, end)          -> {start..end-1: [table, ...]}（左闭右开）
  *   .extract_table([index, ...])        -> {pageIndex: [table, ...]}
  */
-function PDFTableExtractor(pathOrBytes) {
+function PDFTableExtractor(data) {
+  // data: 已读取并转换为 latin1 的 PDF 字节串（由 create 完成输入解析）
+  this.data = data;
+  this._parser = new DictParser(data);
+  this._objMap = new Map();
+
+  // 以下字段由 _initAsync 填充
+  this._xref = null;
+  this._xrefObj = null;
+  this._catalogObj = null;
+  this._metadataObj = null;
+  this.metadata = null;
+  this._pagesRoot = null;
+  this.pages = null;
+}
+
+/** 解析入口参数（文件路径 / Uint8Array / ArrayBuffer）为 latin1 字符串 */
+function resolveData(pathOrBytes) {
   if (typeof pathOrBytes === "string") {
     if (
       typeof process !== "undefined" &&
@@ -2242,37 +2276,49 @@ function PDFTableExtractor(pathOrBytes) {
     ) {
       // Node.js 环境：按路径读取文件
       var fs = require("fs");
-      this.data = bytesToLatin1(fs.readFileSync(pathOrBytes));
+      return bytesToLatin1(fs.readFileSync(pathOrBytes));
     } else {
       throw new Error(
         "PDFTableExtractor: a file path is only supported in Node.js; pass bytes (Uint8Array/ArrayBuffer) in the browser",
       );
     }
   } else if (pathOrBytes instanceof Uint8Array) {
-    this.data = bytesToLatin1(pathOrBytes);
+    return bytesToLatin1(pathOrBytes);
   } else if (pathOrBytes instanceof ArrayBuffer) {
-    this.data = bytesToLatin1(new Uint8Array(pathOrBytes));
+    return bytesToLatin1(new Uint8Array(pathOrBytes));
   } else {
     throw new Error("PDFTableExtractor: expected a file path or binary bytes");
   }
+}
 
-  this._parser = new DictParser(this.data);
+/** 异步初始化：解析 xref、catalog、metadata、pages（含各级流解压） */
+PDFTableExtractor.prototype._initAsync = async function () {
+  this._xref = await this._getXref(); // 内部会设置 this._xrefObj
 
-  this._xref = this._getXref(); // 内部会设置 this._xrefObj
-
-  this._objMap = new Map();
-
-  this._catalogObj = this._getObj(this._xrefObj.dict["Root"], "PDFObj");
-  this._metadataObj = this._getObj(this._xrefObj.dict["Info"], "PDFObj");
+  this._catalogObj = await this._getObj(this._xrefObj.dict["Root"], "PDFObj");
+  this._metadataObj = await this._getObj(this._xrefObj.dict["Info"], "PDFObj");
 
   this.metadata = this._getMetadata();
 
-  this._pagesRoot = this._getObj(this._catalogObj.dict["Pages"], "PDFObj");
+  this._pagesRoot = await this._getObj(
+    this._catalogObj.dict["Pages"],
+    "PDFObj",
+  );
 
-  this.pages = this._getPages();
-}
+  this.pages = await this._getPages();
+};
 
-PDFTableExtractor.prototype._getXref = function () {
+/**
+ * 静态异步工厂：读取输入 + 异步构建对象图，返回构造完成的 PDFTableExtractor。
+ * 与旧版同步构造函数等价，Node.js 与浏览器通用。
+ */
+PDFTableExtractor.create = async function (pathOrBytes) {
+  var self = new PDFTableExtractor(resolveData(pathOrBytes));
+  await self._initAsync();
+  return self;
+};
+
+PDFTableExtractor.prototype._getXref = async function () {
   var pos = this.data.lastIndexOf("startxref");
   assert(pos !== -1, "startxref not found");
   this._parser.pos = pos;
@@ -2299,7 +2345,7 @@ PDFTableExtractor.prototype._getXref = function () {
 
   var start = trailerDict["XRefStm"];
   var end = this.data.indexOf("endobj", start) + 6;
-  this._xrefObj = new XRefObj(this.data.substring(start, end));
+  this._xrefObj = await XRefObj.create(this.data.substring(start, end));
 
   return this._xrefObj.getXref();
 };
@@ -2309,7 +2355,7 @@ PDFTableExtractor.prototype._getXref = function () {
  * id_or_ref: 对象编号，或引用 [obj_id, gen, 'R']
  * type: 'PDFObj' | 'CMapObj' | 'ObjStm' | 'ContentObj'
  */
-PDFTableExtractor.prototype._getObj = function (idOrRef, type) {
+PDFTableExtractor.prototype._getObj = async function (idOrRef, type) {
   var objId;
   if (typeof idOrRef === "number") {
     objId = idOrRef;
@@ -2337,18 +2383,18 @@ PDFTableExtractor.prototype._getObj = function (idOrRef, type) {
     if (type === "PDFObj") {
       obj = new PDFObj(slice);
     } else if (type === "CMapObj") {
-      obj = new CMapObj(slice);
+      obj = await CMapObj.create(slice);
     } else if (type === "ObjStm") {
-      obj = new ObjStm(slice);
+      obj = await ObjStm.create(slice);
     } else if (type === "ContentObj") {
-      obj = new ContentObj(slice);
+      obj = await ContentObj.create(slice);
     } else {
       throw new Error("Unsupported obj type " + type);
     }
     this._objMap.set(obj.id, obj);
   } else if (entry[0] === 2) {
     var parentId = entry[1];
-    var parentObj = this._getObj(parentId, "ObjStm");
+    var parentObj = await this._getObj(parentId, "ObjStm");
     obj = parentObj.getObj(objId);
     this._objMap.set(obj.id, obj);
   } else {
@@ -2382,18 +2428,17 @@ PDFTableExtractor.prototype._getMetadata = function () {
 };
 
 /** 构建页面列表：解析每个页面对象的 Contents、Resources/Font，建立解码映射 */
-PDFTableExtractor.prototype._getPages = function () {
+PDFTableExtractor.prototype._getPages = async function () {
   var pageList = [];
-  var self = this;
   var kids = this._pagesRoot.dict["Kids"];
 
   for (var index = 0; index < kids.length; index++) {
     var ref = kids[index];
     var pageObjId = ref[0];
-    var pageObj = this._getObj(pageObjId, "PDFObj");
+    var pageObj = await this._getObj(pageObjId, "PDFObj");
 
     var contentRef = pageObj.dict["Contents"];
-    var contentObj = this._getObj(contentRef, "ContentObj");
+    var contentObj = await this._getObj(contentRef, "ContentObj");
 
     var fontRefs = pageObj.dict["Resources"]["Font"];
 
@@ -2403,7 +2448,7 @@ PDFTableExtractor.prototype._getPages = function () {
         continue;
       }
       var fontRef = fontRefs[fontName];
-      var fontObj = this._getObj(fontRef, "PDFObj");
+      var fontObj = await this._getObj(fontRef, "PDFObj");
       var encoding = fontObj.dict["Encoding"];
       assert(
         encoding === "WinAnsiEncoding" || encoding === "Identity-H",
@@ -2420,7 +2465,7 @@ PDFTableExtractor.prototype._getPages = function () {
         };
       } else if (encoding === "Identity-H") {
         var cmapRef = fontObj.dict["ToUnicode"];
-        var cmapObj = this._getObj(cmapRef, "CMapObj");
+        var cmapObj = await this._getObj(cmapRef, "CMapObj");
         var cmap = cmapObj.cmap;
         decodeMap[fontName] = (function (cmap) {
           return function (text) {
@@ -2523,136 +2568,6 @@ PDFTableExtractor.prototype.extract_table = function () {
 PDFTableExtractor.prototype.extractTable =
   PDFTableExtractor.prototype.extract_table;
 
-/**
- * 预解压（浏览器）：解析 xref 并收集 PDF 中全部流对象，
- * 用原生 DecompressionStream 异步并行解压，返回解压缓存。
- *
- * 由于 DecompressionStream 是异步 API，而解析器是同步单遍扫描，
- * 因此采用"先预解压、后同步解析"的两段式：
- * 1. prepareStreams(bytes)  -> 返回 inflate 缓存（原始流 -> 解压结果）
- * 2. setInflateCache(cache) -> 同步构造 PDFTableExtractor 时直接命中缓存
- *
- * 本项目样本中所有带流的对象（XRef / ObjStm / CMap / Contents）都是
- * type-1 普通对象，因此遍历 xref 中全部 type-1 对象即可收集所有流。
- */
-PDFTableExtractor.prepareStreams = async function (bytes) {
-  var data = bytesToLatin1(bytes);
-  var parser = new DictParser(data);
-
-  // 1. startxref -> xref 表 -> trailer -> XRefStm（与 _getXref 相同的解析路径）
-  var pos = data.lastIndexOf("startxref");
-  assert(pos !== -1, "startxref not found");
-  parser.pos = pos;
-  parser.readName(); // 'startxref'
-  parser.skipWhitespace();
-  var startxref = parser.readNumber();
-  parser.pos = startxref;
-  assert(parser.readName() === "xref", "expected 'xref'");
-  parser.skipWhitespace();
-  parser.readNumber(); // 子区段起始对象号
-  parser.skipWhitespace();
-  parser.readNumber(); // 子区段对象数量
-  parser.skipWhitespace();
-  assert(parser.readName() === "trailer", "expected 'trailer'");
-  parser.skipWhitespace();
-  var trailerDict = parser.parseDict();
-  var xrefStm = trailerDict["XRefStm"];
-  var xrefEnd = data.indexOf("endobj", xrefStm) + 6;
-  var xrefSlice = data.substring(xrefStm, xrefEnd);
-
-  // 2. 解析 xref 对象（字典 + 原始流），先解压 xref 流以得到交叉引用表
-  var xrefObj = new PDFObj(xrefSlice);
-  assert(xrefObj.dict["Type"] === "XRef", "Type must be XRef");
-  var w = xrefObj.dict["W"];
-  assert(
-    Array.isArray(w) &&
-      w.length === 3 &&
-      w.every(function (v) {
-        return Number.isInteger(v);
-      }),
-    "W must be a 3-element integer array",
-  );
-  var width = w[0] + w[1] + w[2];
-
-  var xrefBytes = await inflateWithDecompressionStream(
-    latin1ToBytes(xrefObj.rawStream),
-  );
-  var xref = new Map(); // obj_id -> [type, num2, num3]
-  for (var i = 0; i + width <= xrefBytes.length; i += width) {
-    var objType = readBigEndian(xrefBytes, i, w[0]);
-    if (objType === 0) {
-      continue;
-    } else if (objType === 1 || objType === 2) {
-      xref.set(Math.floor(i / 7), [
-        objType,
-        readBigEndian(xrefBytes, i + w[0], w[1]),
-        readBigEndian(xrefBytes, i + w[0] + w[1], w[2]),
-      ]);
-    }
-  }
-
-  // 3. 遍历全部 type-1 对象，收集所有带流对象的原始流。
-  //    注意不能对每个对象都做完整 PDFObj 解析：部分对象（如字体 Widths 数组、
-  //    FontDescriptor 字典）含有本解析器不支持的结构（# 转义名、非 ASCII 名等），
-  //    主解析器从不构造它们。这里只按 'stream' / 'endobj' 关键字顺序判断是否为
-  //    流对象，并提取原始流字节（与 PDFObj._getStream 的取流逻辑一致）。
-  function extractRawStream(slice) {
-    var s = slice.indexOf("stream");
-    var e = slice.indexOf("endobj");
-    if (s === -1 || (e !== -1 && e < s)) {
-      return null;
-    }
-    var p = s + 6; // 'stream' 之后
-    while (p < slice.length && WS_CODES.has(slice.charCodeAt(p))) {
-      p += 1;
-    }
-    var es = slice.indexOf("endstream");
-    if (es === -1 || es < p) {
-      return null;
-    }
-    return slice.substring(p, es);
-  }
-
-  var rawList = [xrefObj.rawStream];
-  xref.forEach(function (entry) {
-    if (entry[0] !== 1) {
-      return;
-    }
-    var start2 = entry[1];
-    var end2 = data.indexOf("endobj", start2) + 6;
-    var raw = extractRawStream(data.substring(start2, end2));
-    if (raw !== null) {
-      rawList.push(raw);
-    }
-  });
-  // 去重（xref 流对象自身也出现在 type-1 条目中）
-  rawList = Array.from(new Set(rawList));
-
-  // 4. 异步并行解压全部流
-  var cache = new Map();
-  await Promise.all(
-    rawList.map(function (raw) {
-      return inflateWithDecompressionStream(latin1ToBytes(raw)).then(
-        function (decoded) {
-          cache.set(raw, decoded);
-        },
-      );
-    }),
-  );
-
-  return cache;
-};
-
-/**
- * 异步工厂（浏览器）：使用原生 DecompressionStream 预解压全部流后构造提取器。
- * 与同步构造函数等价，仅在浏览器（存在 DecompressionStream）时可用。
- */
-PDFTableExtractor.create = async function (bytes) {
-  var cache = await PDFTableExtractor.prepareStreams(bytes);
-  setInflateCache(cache);
-  return new PDFTableExtractor(bytes);
-};
-
 // ---------------- 导出 ----------------
 // 兼容 Node.js（CommonJS）与浏览器（直接作为全局使用）
 if (typeof module !== "undefined" && module.exports) {
@@ -2675,6 +2590,6 @@ if (typeof module !== "undefined" && module.exports) {
     MarkedContentBlock: MarkedContentBlock,
     bytesToLatin1: bytesToLatin1,
     readBigEndian: readBigEndian,
-    setInflateCache: setInflateCache,
+    inflateAsync: inflateAsync,
   };
 }

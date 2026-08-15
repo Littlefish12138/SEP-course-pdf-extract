@@ -11,14 +11,14 @@
 
 const { PDFTableExtractor } = require('./extract.js');
 
-function main(argv) {
+async function main(argv) {
   const file = argv[0];
   if (!file) {
     console.error('用法: node cli.js <pdf文件> [页面索引] [结束索引]');
     process.exit(1);
   }
 
-  const extractor = new PDFTableExtractor(file);
+  const extractor = await PDFTableExtractor.create(file);
 
   let result;
   if (argv.length === 1) {
@@ -32,4 +32,7 @@ function main(argv) {
   process.stdout.write(JSON.stringify(result, null, 1) + '\n');
 }
 
-main(process.argv.slice(2));
+main(process.argv.slice(2)).catch(function (err) {
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+});
