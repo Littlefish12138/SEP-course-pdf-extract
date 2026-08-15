@@ -122,7 +122,7 @@ class DictParser(BaseParser):
         如果为 1 0 R 的模式则解析出元组(1,0,'R')\n
         解析完成后自动移动光标位置 
         """
-        assert self.data[self.pos] in b'0123456789'
+        assert self.data[self.pos] in b'+-.0123456789'
         a = self.read_number()
         saved_pos = self.pos
         self.skip_whitespace()
