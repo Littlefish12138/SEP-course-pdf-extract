@@ -36,7 +36,8 @@ selected = extractor.extract_table([0, 2])     # PDF 第 1、3 页
 ```js
 const { PDFTableExtractor } = require("./js/extract.js");
 
-const extractor = new PDFTableExtractor("course_schedule.pdf"); // 路径或 Uint8Array/ArrayBuffer
+// 构造是异步的（FlateDecode 解压在浏览器中是异步 API），需在 async 函数内 await
+const extractor = await PDFTableExtractor.create("course_schedule.pdf"); // 路径或 Uint8Array/ArrayBuffer
 
 const all_pages = extractor.extract_table(); // {0: [table, ...], 1: [table, ...], ...}
 const page_two = extractor.extract_table(1); // PDF 第 2 页，返回 [table, ...]
@@ -46,7 +47,7 @@ const selected = extractor.extract_table([0, 2]); // PDF 第 1、3 页
 
 命令行用法：`node js/cli.js <pdf文件> [页面索引] [结束索引]`，输出与 Python 版一致的 JSON。
 
-浏览器中使用时，需要提供 zlib inflate 实现：Node.js 下自动使用内置 `zlib`；浏览器下推荐使用原生 `DecompressionStream`（通过异步工厂 `PDFTableExtractor.create(bytes)` 预解压全部流，`html/index.html` 即采用此方式）；若页面提供了全局 `pako`，同步构造函数也能直接使用。
+构造统一走静态异步工厂 `PDFTableExtractor.create(path_or_bytes)`，构造完成后 `extract_table` 等提取接口保持同步。FlateDecode 解压按环境自动选择：Node.js 下用内置 `zlib`；浏览器下用原生 `DecompressionStream`（异步），若页面提供了全局 `pako` 则回退到 `pako`（同步）。Node.js 与浏览器共用同一份 `js/extract.js`，仅解压钩子和入口读取方式不同。
 
 ### 浏览器版（单文件 HTML）
 
