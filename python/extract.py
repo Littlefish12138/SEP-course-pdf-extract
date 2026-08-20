@@ -1555,7 +1555,7 @@ class PDFTableExtractor:
         metadata = {}
 
         for key, value in meta_data.items():
-            if key in (b'Producer',b'Creator') and value[:2] == b'\xfe\xff':
+            if value[:2] == b'\xfe\xff':
                 metadata[key.decode()] = value.decode('utf-16')
             else:
                 metadata[key.decode()] = value.decode()

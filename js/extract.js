@@ -2414,7 +2414,6 @@ PDFTableExtractor.prototype._getMetadata = function () {
     }
     var value = metaData[key];
     if (
-      (key === "Producer" || key === "Creator") &&
       value.length >= 2 &&
       value.charCodeAt(0) === 0xfe &&
       value.charCodeAt(1) === 0xff
