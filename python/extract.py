@@ -5,7 +5,7 @@ from typing import overload
 
 
 # 全局变量
-TOLERANCE = 0.7      # 用于识别q/Q的裁剪区域与单元格是否一致时的容许误差
+TOLERANCE = 1.5      # 用于识别q/Q的裁剪区域与单元格是否一致时的容许误差
 MERGE_GAP = 0.05   # 用于清洗表格边框之间的细小间隙
 LINE_MIN_SPAN = 5.0       # 黑色网格中识别表格线所需的最小长边
 LINE_EDGE_TOLERANCE = 2.0 # 单元格边与逻辑表格线中心的最大对齐误差
@@ -1282,7 +1282,7 @@ class ContentObj(PDFObj):
         将 marked_blocks 定位到 get_cells 得到的单元格中
 
         定位优先级顺序:
-        1. clip 与某个单元格矩形相等
+        1. clip 与某个单元格矩形相等或在单元格内部
         2. 根据包含基线坐标 + 位于裁剪区域内部进行筛选, 能确定出唯一单元格
         3. 无法定位时认为该 block 不在表格当中
         """
@@ -1307,35 +1307,22 @@ class ContentObj(PDFObj):
 
         all_cells = [cell for table in tables for cell in table["cells"]]
 
-        def locate_block(block: MarkedContentBlock) -> dict | None:
-            # 1. 若某个 TextItem 的裁剪区域与某个单元格一致, 则认为所有 Textitem 属于该单元格
-            for item in block.text_items:
-                for cell in all_cells:
-                    if item.clip == cell["rect"]:
-                        return cell
-
-            # 2. 若无法找到完全一致的单元格, 则根据包含基线坐标 + 位于裁剪区域内部进行筛选
-            # 断言此类单元格只有一个
-            located_cell = None
-            for item in block.text_items:
-                matches = [
-                    cell for cell in all_cells
-                    if (item.x, item.y) in cell["rect"] and cell["rect"] in item.clip
-                ]
-
-                if len(matches) != 1:
+        def locate_block(block: MarkedContentBlock) -> dict | None:            
+            for cell in all_cells:
+                # 1. 若所有 TextItem 的裁剪区域与某个单元格一致或在该单元格内部, 
+                # 则认为所有 Textitem 属于该单元格
+                if all(item.clip in cell["rect"] for item in block.text_items):
+                    return cell
+                
+                # 2.若无法找到完全一致的单元格, 则根据
+                # 包含某一个TextItem的基线坐标 + 位于所有TextItem的裁剪区域内部进行筛选
+                if not all(cell["rect"] in item.clip for item in block.text_items):
                     continue
 
-                match = matches[0]
+                if any((item.x, item.y) in cell["rect"] for item in block.text_items):
+                    return cell
 
-                if located_cell is None:
-                    located_cell = match
-                elif match != located_cell:
-                    raise AssertionError(
-                        "all text baselines in one marked content block "
-                        "must be in the same cell"
-                    )
-            return located_cell
+            return None
 
         def block_reading_key(block: MarkedContentBlock):
             if not block.text_items:
@@ -1446,7 +1433,9 @@ class Page:
                 'row_span':  raw_cell['row_span'],
                 'col_span':  raw_cell['col_span'],
                 'bbox':      raw_cell['bbox'],
-                'text':      self.decode_text(raw_cell['marked_blocks'][0]) if raw_cell['marked_blocks'] else ''
+                'text':      ''.join(
+                    self.decode_text(block) for block in raw_cell['marked_blocks']
+                )
             } for raw_cell in raw_table['cells']]
 
             table['cells'] = cells
