@@ -24,7 +24,7 @@
 "use strict";
 
 // ---------------- 全局常量 ----------------
-var TOLERANCE = 0.7; // 识别 q/Q 的裁剪区域与单元格是否一致时的容许误差
+var TOLERANCE = 1.5; // 识别 q/Q 的裁剪区域与单元格是否一致时的容许误差
 var MERGE_GAP = 0.05; // 清洗表格边框之间的细小间隙
 var LINE_MIN_SPAN = 5.0; // 黑色网格中识别表格线所需的最小长边
 var LINE_EDGE_TOLERANCE = 2.0; // 单元格边与逻辑表格线中心的最大对齐误差
@@ -1987,53 +1987,53 @@ ContentObj.prototype.getTables = function () {
 
   /** 将单个标记内容块定位到单元格，无法定位时返回 null */
   function locateBlock(block) {
-    // 1. 若某个 TextItem 的裁剪区域与某个单元格一致, 则认为所有 TextItem 属于该单元格
-    for (var i = 0; i < block.textItems.length; i++) {
-      var item = block.textItems[i];
-      for (var j = 0; j < allCells.length; j++) {
-        var cell = allCells[j];
+    for (var i = 0; i < allCells.length; i++) {
+      var cell = allCells[i];
+
+      // 1. 若所有 TextItem 的裁剪区域与某个单元格一致或在该单元格内部,
+      // 则认为所有 TextItem 属于该单元格
+      var allClipInsideCell = true;
+      for (var j = 0; j < block.textItems.length; j++) {
+        var item = block.textItems[j];
         if (
-          item.clip !== null &&
-          item.clip !== undefined &&
-          item.clip.equals(cell.rect)
+          item.clip === null ||
+          item.clip === undefined ||
+          !cell.rect.containsRect(item.clip)
         ) {
+          allClipInsideCell = false;
+          break;
+        }
+      }
+      if (allClipInsideCell) {
+        return cell;
+      }
+
+      // 2. 若无法找到完全一致的单元格, 则根据
+      // 包含某一个 TextItem 的基线坐标 + 位于所有 TextItem 的裁剪区域内部进行筛选
+      var allCellInsideClips = true;
+      for (var j2 = 0; j2 < block.textItems.length; j2++) {
+        var item2 = block.textItems[j2];
+        if (
+          item2.clip === null ||
+          item2.clip === undefined ||
+          !item2.clip.containsRect(cell.rect)
+        ) {
+          allCellInsideClips = false;
+          break;
+        }
+      }
+      if (!allCellInsideClips) {
+        continue;
+      }
+
+      for (var j3 = 0; j3 < block.textItems.length; j3++) {
+        var item3 = block.textItems[j3];
+        if (cell.rect.containsPoint(item3.x, item3.y)) {
           return cell;
         }
       }
     }
-
-    // 2. 若无法找到完全一致的单元格, 则根据包含基线坐标 + 位于裁剪区域内部进行筛选
-    // 断言此类单元格只有一个
-    var locatedCell = null;
-    for (var i2 = 0; i2 < block.textItems.length; i2++) {
-      var item2 = block.textItems[i2];
-      var matches = [];
-      for (var j2 = 0; j2 < allCells.length; j2++) {
-        var cell2 = allCells[j2];
-        if (
-          cell2.rect.containsPoint(item2.x, item2.y) &&
-          item2.clip !== null &&
-          item2.clip !== undefined &&
-          item2.clip.containsRect(cell2.rect)
-        ) {
-          matches.push(cell2);
-        }
-      }
-
-      if (matches.length !== 1) {
-        continue;
-      }
-
-      var match = matches[0];
-      if (locatedCell === null) {
-        locatedCell = match;
-      } else if (!match.rect.equals(locatedCell.rect)) {
-        throw new Error(
-          "all text baselines in one marked content block must be in the same cell",
-        );
-      }
-    }
-    return locatedCell;
+    return null;
   }
 
   /** 标记内容块的阅读顺序键 */
@@ -2223,10 +2223,11 @@ Page.prototype.getTables = function () {
         row_span: rawCell.row_span,
         col_span: rawCell.col_span,
         bbox: rawCell.bbox,
-        text:
-          rawCell.marked_blocks.length > 0
-            ? self.decodeText(rawCell.marked_blocks[0])
-            : "",
+        text: rawCell.marked_blocks
+          .map(function (block) {
+            return self.decodeText(block);
+          })
+          .join(""),
       });
     }
     table.cells = cells;
